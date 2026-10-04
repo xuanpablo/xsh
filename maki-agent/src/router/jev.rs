@@ -109,11 +109,16 @@ impl JevClient {
                 .map(|(name, q)| (name.as_str(), q.to_json()))
                 .collect::<BTreeMap<_, _>>(),
         });
+        let request = isahc::Request::builder()
+            .method("POST")
+            .uri(&self.endpoint)
+            .header("authorization", format!("Bearer {key}"))
+            .header("content-type", "application/json")
+            .header("accept", "application/json")
+            .body(isahc::AsyncBody::from_bytes_static(body.to_string()))
+            .map_err(|e| JevError::Http(e.to_string()))?;
         let response = http
-            .post_async(
-                &self.endpoint,
-                isahc::AsyncBody::from_bytes_static(body.to_string()),
-            )
+            .send_async(request)
             .await
             .map_err(|e| JevError::Http(e.to_string()))?;
         if !response.status().is_success() {
