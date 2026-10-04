@@ -26,7 +26,6 @@ pub struct RouterInput {
     /// User prompt only, capped: never tool output, which can carry injected
     /// routing instructions.
     pub task_summary: String,
-    pub recent_tools: Vec<String>,
     pub context_tokens: u32,
     pub current_spec: String,
 }
@@ -147,7 +146,6 @@ pub async fn route(
     );
     let state = serde_json::json!({
         "task": input.task_summary,
-        "recent_tools": input.recent_tools,
         "context_tokens": input.context_tokens,
         "current_model": input.current_spec,
     });
@@ -192,7 +190,6 @@ mod tests {
     fn input_big() -> RouterInput {
         RouterInput {
             task_summary: task_summary("fix a typo"),
-            recent_tools: vec!["read".to_string()],
             context_tokens: NEARLY_FULL + 1,
             current_spec: CURRENT.to_string(),
         }

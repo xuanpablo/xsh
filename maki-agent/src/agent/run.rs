@@ -498,10 +498,15 @@ impl<'h> Agent<'h> {
         self.model = Arc::new(current.model.clone());
     }
 
-    /// One decision per run: Jev picks the model, the shared slot carries it,
-    /// and `sync_model` still owns adoption, so a divergent frame defers the
-    /// switch to the next run. Compaction keeps its own model path.
+    /// One decision per top-level run: Jev picks the model, the shared slot
+    /// carries it, and `sync_model` still owns adoption, so a divergent frame
+    /// defers the switch to the next run. Compaction keeps its own model path.
+    /// Subagents never route: their tasks would steer the shared slot against
+    /// the parent's job. Without a slot there is nothing to carry the pick.
     async fn route_model(&mut self, task: &str) {
+        if !self.audience.contains(ToolAudience::MAIN) || self.model_sync.is_none() {
+            return;
+        }
         let router = &self.config.router;
         if !router.enabled || router.candidates.is_empty() {
             return;
@@ -513,7 +518,6 @@ impl<'h> Agent<'h> {
         }
         let input = RouterInput {
             task_summary: task_summary(task),
-            recent_tools: Vec::new(),
             context_tokens: self.gauge.size(),
             current_spec: self.model.spec(),
         };
@@ -3605,6 +3609,25 @@ mod tests {
             assert_eq!(requests[1].model, expected.id, "{msg}");
             assert_append_only(&requests[0], &requests[1]);
             assert_eq!(hits.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    #[test]
+    fn subagent_runs_and_slotless_agents_never_call_the_router() {
+        unsafe { std::env::set_var(ROUTER_JEV_KEY_ENV, "test-key") };
+        smol::block_on(async {
+            let mock = MockProvider::new(vec![text_response(StopReason::EndTurn)]);
+            let provider: Arc<dyn Provider> = Arc::new(mock);
+            let start = default_model();
+            let (endpoint, hits) = mock_jev(&start.spec());
+            let config = router_agent_config(endpoint, vec!["anthropic/claude-opus-4-1".into()], true);
+            let history = &mut History::new(Vec::new());
+            // A subagent run: not the MAIN audience, and no model_sync slot.
+            let (mut agent, _event_rx) =
+                make_agent_with_config(provider, start, history, config);
+            agent.audience = ToolAudience::RESEARCH_SUB;
+            agent.run(default_input()).await.unwrap();
+            assert_eq!(hits.load(Ordering::SeqCst), 0);
         });
     }
 
