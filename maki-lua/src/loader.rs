@@ -99,6 +99,10 @@ static BUNDLED_PLUGINS: &[BundledPlugin] = &[
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/bash"),
     },
     BundledPlugin {
+        name: "bash_bg",
+        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/bash_bg"),
+    },
+    BundledPlugin {
         name: "diagnostics",
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/diagnostics"),
     },
@@ -125,6 +129,10 @@ static BUNDLED_PLUGINS: &[BundledPlugin] = &[
     BundledPlugin {
         name: "todo_write",
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/todo_write"),
+    },
+    BundledPlugin {
+        name: "goal",
+        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/goal"),
     },
     BundledPlugin {
         name: "read",
