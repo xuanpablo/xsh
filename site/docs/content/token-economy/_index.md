@@ -65,6 +65,14 @@ in context forever               1 turn, 1 line in context
 
 **Compaction** resets the multiplier when a session runs long: older turns are summarized and dropped. [Context](/docs/context/#when-the-window-fills) has the details.
 
+## The right model per run
+
+Most requests do not need the strongest model. A typo fix and a kernel debugger both bill by the token, and only one of them profits from frontier reasoning.
+
+Set `[agent.router]` in your config and Maki asks a Jev decision endpoint which model a run should use. The request carries a capped summary of your message, the tools named recently, and the context size. The answer names one model from your `candidates` list, and Maki adopts it when the answer clears `confidence_threshold`. Candidates must share the current provider and thinking support, so a switch never forces a prompt rebuild and your cache stays valid. When the endpoint is slow, unconfigured, or unsure, the run simply keeps its current model.
+
+The decision costs a few hundred tokens per run. Routing a small task to a small model pays that back the first turn.
+
 ## Watching it work
 
 `/usage` shows the token breakdown of the current session, and `--output-format json` in [Headless Mode](/docs/headless/) reports `total_cost_usd` per run. Cheap is a feature you can measure.

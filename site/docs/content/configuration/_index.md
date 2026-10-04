@@ -131,6 +131,17 @@ How many lines of output to show per tool in the UI. All values are `usize` with
 | `stale_read_check` | bool | `true` | - | Require re-reading a file that changed on disk before editing it |
 | `rtk` | bool | `true` | - | Rewrite bash commands with [rtk](https://github.com/rtk-ai/rtk) when it is installed |
 
+### `agent.router`
+
+| Field | Type | Default | Min | Description |
+|-------|------|---------|-----|-------------|
+| `enabled` | bool | `false` | - | Route each run to a model via Jev decision calls |
+| `endpoint` | String | `none` | - | Jev /v1/decide endpoint |
+| `api_key_env` | String | `none` | - | Env var holding the Jev API key; router is off when unset |
+| `timeout_ms` | u64 | `1500` | 100 | Router decision timeout (milliseconds) |
+| `confidence_threshold` | f32 | `0.7` | - | Minimum confidence for the router to adopt its pick |
+| `candidates` | string[] | `[]` | - | Qualified model specs the router may pick from |
+
 ### `provider`
 
 | Field | Type | Default | Min | Description |

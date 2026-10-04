@@ -1431,10 +1431,10 @@ pub struct RouterConfig {
     #[config(default = DEFAULT_ROUTER_TIMEOUT_MS, min = 100, desc = "Router decision timeout (milliseconds)")]
     pub timeout_ms: u64,
 
-    #[config(skip)]
+    #[config(ty = "f32", default_doc = "0.7", desc = "Minimum confidence for the router to adopt its pick")]
     pub confidence_threshold: f32,
 
-    #[config(skip)]
+    #[config(ty = "string[]", default_doc = "[]", desc = "Qualified model specs the router may pick from")]
     pub candidates: Vec<String>,
 }
 
