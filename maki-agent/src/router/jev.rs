@@ -1,8 +1,11 @@
 use isahc::AsyncReadResponseExt;
 use isahc::config::Configurable;
 use std::collections::BTreeMap;
+#[cfg(test)]
 use std::io::{Read, Write};
+#[cfg(test)]
 use std::net::TcpListener;
+#[cfg(test)]
 use std::thread;
 use std::time::Duration;
 
@@ -155,6 +158,7 @@ impl JevClient {
     }
 }
 
+#[cfg(test)]
 fn test_client(uri: String) -> JevClient {
     let config = maki_config::RouterConfig {
         endpoint: format!("{uri}/v1/decide"),
@@ -168,6 +172,7 @@ fn test_client(uri: String) -> JevClient {
     }
 }
 
+#[cfg(test)]
 fn test_questions() -> BTreeMap<String, Question> {
     BTreeMap::from([
         (
@@ -190,6 +195,7 @@ fn test_questions() -> BTreeMap<String, Question> {
 }
 
 /// Minimal HTTP server: one canned response per accepted connection.
+#[cfg(test)]
 fn mock_server(status: &'static str, body: &'static str) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("addr");
