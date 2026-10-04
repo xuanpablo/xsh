@@ -23,6 +23,8 @@ use super::instructions::{CallInstructions, LoadedInstructions};
 use super::streaming::{StreamError, StreamRequest, stream_with_retry};
 use super::tool_dispatch::{self, RecentCalls};
 use crate::cancel::{CancelMap, CancelToken};
+use crate::router::decide::{RouterInput, route, task_summary};
+use crate::router::jev::JevClient;
 use crate::mcp::{McpSession, ToolDeferral};
 use crate::permissions::PermissionManager;
 use crate::tools::hook::Verdict;
@@ -226,6 +228,12 @@ impl<'h> Agent<'h> {
         self
     }
 
+    #[cfg(test)]
+    fn with_config(mut self, config: AgentConfig) -> Self {
+        self.config = config;
+        self
+    }
+
     pub fn with_mcp(mut self, mcp: Option<McpSession>) -> Self {
         self.mcp = mcp;
         self
@@ -317,6 +325,7 @@ impl<'h> Agent<'h> {
             message_len = message.len(),
             "agent run started"
         );
+        self.route_model(&message).await;
         // Subagents are prompted by the machine inside the parent's window;
         // counting them would inflate prompts and busy time.
         let top_level = self.audience.contains(ToolAudience::MAIN);
@@ -487,6 +496,61 @@ impl<'h> Agent<'h> {
         self.prompt_facts = candidate.facts;
         self.provider = Arc::clone(&current.provider);
         self.model = Arc::new(current.model.clone());
+    }
+
+    /// One decision per run: Jev picks the model, the shared slot carries it,
+    /// and `sync_model` still owns adoption, so a divergent frame defers the
+    /// switch to the next run. Compaction keeps its own model path.
+    async fn route_model(&mut self, task: &str) {
+        let router = &self.config.router;
+        if !router.enabled || router.candidates.is_empty() {
+            return;
+        }
+        let client = JevClient::new(router);
+        if !client.has_key() {
+            debug!(env = %router.api_key_env, "router has no api key, staying on the current model");
+            return;
+        }
+        let input = RouterInput {
+            task_summary: task_summary(task),
+            recent_tools: Vec::new(),
+            context_tokens: self.gauge.size(),
+            current_spec: self.model.spec(),
+        };
+        let decision = route(
+            &client,
+            &self.model_policy,
+            &router.candidates,
+            &input,
+            router.confidence_threshold,
+        )
+        .await;
+        let Some(spec) = decision.spec else {
+            info!(reason = ?decision.reason, current = %self.model.spec(), "router kept the current model");
+            return;
+        };
+        let mut model = match maki_providers::model::Model::from_spec(&spec) {
+            Ok(model) => model,
+            Err(e) => {
+                warn!(spec = %spec, error = %e, "router pick does not parse");
+                return;
+            }
+        };
+        // Candidates share the current provider slug (filter_candidates), so
+        // the run's own provider carries the pick and only the model adjusts.
+        let _ = maki_providers::provider::adjust_model(&mut model, self.timeouts);
+        info!(
+            from = %self.model.spec(),
+            to = %spec,
+            reason = ?decision.reason,
+            "router picked a model"
+        );
+        if let Some(slot) = &self.model_sync {
+            slot.store(Arc::new(ModelSlot {
+                model,
+                provider: Arc::clone(&self.provider),
+            }));
+        }
     }
 
     /// Right before every request. A compaction drops the frame, so it may
@@ -1132,6 +1196,8 @@ fn interrupt_message(message: String, images: Vec<ImageSource>) -> Message {
 mod tests {
     use std::collections::VecDeque;
     use std::path::Path;
+    use std::io::{Read as _, Write as _};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     use maki_config::ProjectConfig;
@@ -3414,6 +3480,146 @@ mod tests {
 
             assert_eq!(reason, DoneReason::EndTurn);
             assert_continued(&drain_events(&event_rx), &history, allowed);
+        });
+    }
+
+    const ROUTER_ADOPTED_MSG: &str =
+        "a router pick under a matching frame is adopted between turns";
+    const ROUTER_HELD_MSG: &str =
+        "a router pick whose frame diverges must wait for the next run";
+    const ROUTER_JEV_KEY_ENV: &str = "MAKI_TEST_JEV_KEY";
+
+    /// One canned Jev answer on a local port, plus how many requests it took.
+    fn mock_jev(choice: &str) -> (String, Arc<AtomicUsize>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&hits);
+        let body = serde_json::json!({
+            "answers": {
+                "model": {"choice": choice, "confidence": 0.99},
+                "needs_strong_model": {"noul": 0.5}
+            }
+        })
+        .to_string();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                counter.fetch_add(1, Ordering::SeqCst);
+                let mut buf = [0u8; 8192];
+                let _ = stream.read(&mut buf);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        (format!("http://{addr}/v1/decide"), hits)
+    }
+
+    fn router_agent_config(endpoint: String, candidates: Vec<String>, enabled: bool) -> AgentConfig {
+        AgentConfig {
+            router: maki_config::RouterConfig {
+                enabled,
+                endpoint,
+                api_key_env: ROUTER_JEV_KEY_ENV.to_string(),
+                confidence_threshold: 0.7,
+                timeout_ms: 2000,
+                candidates,
+            },
+            ..AgentConfig::default()
+        }
+    }
+
+    fn make_agent_with_config(
+        provider: Arc<dyn Provider>,
+        model: Model,
+        history: &mut History,
+        config: AgentConfig,
+    ) -> (Agent<'_>, flume::Receiver<Envelope>) {
+        let (agent, rx) = make_agent_with(provider, model, history);
+        (agent.with_config(config), rx)
+    }
+
+    #[test_case(true ; "matching_frame")]
+    #[test_case(false ; "divergent_frame")]
+    fn router_pick_adoption_follows_the_frame(same_tools: bool) {
+        unsafe { std::env::set_var(ROUTER_JEV_KEY_ENV, "test-key") };
+        smol::block_on(async {
+            let mock = MockProvider::new(vec![
+                tool_call_response("glob", "t1"),
+                text_response(StopReason::EndTurn),
+            ]);
+            let requests = Arc::clone(&mock.requests);
+            let provider: Arc<dyn Provider> = Arc::new(mock);
+            let start = default_model();
+            let switched = Model {
+                id: "claude-opus-4-1-20250805".into(),
+                ..start.clone()
+            };
+            let (endpoint, hits) = mock_jev(&switched.spec());
+            let config = router_agent_config(endpoint, vec![switched.spec()], true);
+            let history = &mut History::new(Vec::new());
+            let (agent, _event_rx) =
+                make_agent_with_config(Arc::clone(&provider), start.clone(), history, config);
+            let slot = Arc::new(ArcSwap::from_pointee(ModelSlot {
+                model: start.clone(),
+                provider: Arc::clone(&provider),
+            }));
+            let mut agent = agent.with_model_sync(slot);
+            let build = move |model: &Model, _: bool| {
+                let tool = if same_tools {
+                    "glob".to_owned()
+                } else {
+                    format!("tool_for_{}", model.id)
+                };
+                RunContext {
+                    system: "system".into(),
+                    tools: RequestTools::assembled(
+                        serde_json::json!([{ "name": tool }]),
+                        &AgentConfig::default(),
+                        model,
+                    ),
+                    facts: Some(PromptFacts {
+                        model: model.spec(),
+                        ..Default::default()
+                    }),
+                    authored: String::new(),
+                }
+            };
+            agent.context = Arc::new(build);
+            agent.run(default_input()).await.unwrap();
+
+            let requests = requests.lock().unwrap();
+            // sync_model runs at the top of the loop, so a frame-compatible
+            // pick lands on the very first request; a divergent frame never
+            // lands within this run.
+            let expected = if same_tools { &switched } else { &start };
+            let msg = if same_tools {
+                ROUTER_ADOPTED_MSG
+            } else {
+                ROUTER_HELD_MSG
+            };
+            assert_eq!(requests[0].model, expected.id, "{msg}");
+            assert_eq!(requests[1].model, expected.id, "{msg}");
+            assert_append_only(&requests[0], &requests[1]);
+            assert_eq!(hits.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    #[test]
+    fn disabled_router_never_calls_the_backend() {
+        unsafe { std::env::set_var(ROUTER_JEV_KEY_ENV, "test-key") };
+        smol::block_on(async {
+            let mock = MockProvider::new(vec![text_response(StopReason::EndTurn)]);
+            let provider: Arc<dyn Provider> = Arc::new(mock);
+            let start = default_model();
+            let config = router_agent_config("http://127.0.0.1:1/v1/decide".into(), vec![], false);
+            let history = &mut History::new(Vec::new());
+            let (mut agent, _event_rx) =
+                make_agent_with_config(provider, start.clone(), history, config);
+            agent.run(default_input()).await.unwrap();
         });
     }
 }
