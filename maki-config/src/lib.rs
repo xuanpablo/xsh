@@ -62,6 +62,11 @@ pub const DEFAULT_MAX_TIMEOUT_RETRIES: u32 = 10;
 /// period.
 pub const DEFAULT_MAX_RETRIES: u32 = 5;
 
+pub const DEFAULT_ROUTER_ENDPOINT: &str = "https://api.jevai.org/v1/decide";
+pub const DEFAULT_ROUTER_API_KEY_ENV: &str = "JEV_API_KEY";
+pub const DEFAULT_ROUTER_CONFIDENCE_THRESHOLD: f32 = 0.7;
+pub const DEFAULT_ROUTER_TIMEOUT_MS: u64 = 1500;
+
 pub const DEFAULT_MAX_LOG_BYTES_MB: u64 = 200;
 pub const DEFAULT_MAX_LOG_FILES: u32 = 10;
 pub const DEFAULT_INPUT_HISTORY_SIZE: usize = 100;
@@ -442,6 +447,8 @@ pub enum ConfigError {
         #[source]
         source: globset::Error,
     },
+    #[error("invalid config: {0}")]
+    Invalid(String),
 }
 
 fn check(
@@ -581,7 +588,7 @@ impl RawConfig {
                     .transpose()?,
             },
             ui: UiConfig::from_file(self.ui),
-            agent: AgentConfig::from_file(self.agent),
+            agent: AgentConfig::from_file(self.agent)?,
             provider: ProviderConfig::from_file(self.provider)?,
             storage: StorageConfig::from_file(self.storage),
             net: NetConfig::from_file(self.net),
@@ -801,6 +808,8 @@ pub struct AgentFileConfig {
     pub post_compaction_instructions: Option<String>,
     pub stale_read_check: Option<bool>,
     pub rtk: Option<bool>,
+    #[serde(default)]
+    pub router: Option<RouterFileConfig>,
 }
 
 impl AgentFileConfig {
@@ -816,7 +825,8 @@ impl AgentFileConfig {
             compaction_instructions,
             post_compaction_instructions,
             stale_read_check,
-            rtk
+            rtk,
+            router
         );
     }
 }
@@ -1407,6 +1417,72 @@ impl Default for ToolOutputLines {
 }
 
 #[derive(Debug, Clone, ConfigSection, Serialize)]
+#[config(section = "agent.router", fields_only)]
+pub struct RouterConfig {
+    #[config(default = false, desc = "Route each run to a model via Jev decision calls")]
+    pub enabled: bool,
+
+    #[config(ty = "String", desc = "Jev /v1/decide endpoint")]
+    pub endpoint: String,
+
+    #[config(ty = "String", desc = "Env var holding the Jev API key; router is off when unset")]
+    pub api_key_env: String,
+
+    #[config(default = DEFAULT_ROUTER_TIMEOUT_MS, min = 100, desc = "Router decision timeout (milliseconds)")]
+    pub timeout_ms: u64,
+
+    #[config(skip)]
+    pub confidence_threshold: f32,
+
+    #[config(skip)]
+    pub candidates: Vec<String>,
+}
+
+impl Default for RouterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoint: DEFAULT_ROUTER_ENDPOINT.to_string(),
+            api_key_env: DEFAULT_ROUTER_API_KEY_ENV.to_string(),
+            timeout_ms: DEFAULT_ROUTER_TIMEOUT_MS,
+            confidence_threshold: DEFAULT_ROUTER_CONFIDENCE_THRESHOLD,
+            candidates: Vec::new(),
+        }
+    }
+}
+
+#[derive(Deserialize, Default, Debug)]
+#[serde(default, deny_unknown_fields)]
+pub struct RouterFileConfig {
+    pub enabled: Option<bool>,
+    pub endpoint: Option<String>,
+    pub api_key_env: Option<String>,
+    pub confidence_threshold: Option<f32>,
+    pub timeout_ms: Option<u64>,
+    pub candidates: Option<Vec<String>>,
+}
+
+impl RouterFileConfig {
+    fn into_config(self) -> Result<RouterConfig, ConfigError> {
+        let d = RouterConfig::default();
+        let confidence_threshold = self.confidence_threshold.unwrap_or(d.confidence_threshold);
+        if !(0.0..=1.0).contains(&confidence_threshold) {
+            return Err(ConfigError::Invalid(
+                "agent.router.confidence_threshold must be between 0.0 and 1.0".to_string(),
+            ));
+        }
+        Ok(RouterConfig {
+            enabled: self.enabled.unwrap_or(d.enabled),
+            endpoint: self.endpoint.unwrap_or(d.endpoint),
+            api_key_env: self.api_key_env.unwrap_or(d.api_key_env),
+            timeout_ms: self.timeout_ms.unwrap_or(d.timeout_ms),
+            confidence_threshold,
+            candidates: self.candidates.unwrap_or(d.candidates),
+        })
+    }
+}
+
+#[derive(Debug, Clone, ConfigSection, Serialize)]
 #[config(section = "agent")]
 pub struct AgentConfig {
     #[config(default = DEFAULT_MAX_OUTPUT_BYTES, min = MIN_OUTPUT_BYTES, desc = "Max tool output size (bytes)")]
@@ -1460,11 +1536,14 @@ pub struct AgentConfig {
     /// registers its tool, so its name stays free for another plugin to claim.
     #[config(skip, default = "Vec::new()")]
     pub disabled_tools: Vec<String>,
+
+    #[config(skip, default = "RouterConfig::default()")]
+    pub router: RouterConfig,
 }
 
 impl AgentConfig {
-    fn from_file(file: AgentFileConfig) -> Self {
-        Self {
+    fn from_file(file: AgentFileConfig) -> Result<Self, ConfigError> {
+        Ok(Self {
             max_output_bytes: file.max_output_bytes.unwrap_or(DEFAULT_MAX_OUTPUT_BYTES),
             max_output_lines: file.max_output_lines.unwrap_or(DEFAULT_MAX_OUTPUT_LINES),
             max_continuation_turns: file
@@ -1476,10 +1555,14 @@ impl AgentConfig {
             post_compaction_instructions: file.post_compaction_instructions,
             stale_read_check: file.stale_read_check.unwrap_or(true),
             rtk: file.rtk.unwrap_or(true),
+            router: match file.router {
+                Some(r) => r.into_config()?,
+                None => RouterConfig::default(),
+            },
             max_turns: None,
             allowed_tools: Vec::new(),
             disabled_tools: Vec::new(),
-        }
+        })
     }
 }
 
@@ -4649,5 +4732,42 @@ mod tests {
             expand_env("Bearer ${MAKI_TEST_HDR_EMPTY_71535}"),
             Err("MAKI_TEST_HDR_EMPTY_71535".to_string())
         );
+    }
+
+    #[test]
+    fn router_config_defaults_when_absent() {
+        let config = RawConfig::default().into_config(&[]).unwrap();
+        assert!(!config.agent.router.enabled);
+        assert_eq!(config.agent.router.api_key_env, "JEV_API_KEY");
+        assert!((config.agent.router.confidence_threshold - 0.7).abs() < f32::EPSILON);
+        assert_eq!(config.agent.router.timeout_ms, 1500);
+        assert!(config.agent.router.candidates.is_empty());
+    }
+
+    #[test]
+    fn router_config_parses_candidates_and_threshold() {
+        let raw: RawConfig = toml::from_str(
+            r#"
+            [agent.router]
+            enabled = true
+            endpoint = "https://jev.example/v1/decide"
+            candidates = ["zai/glm-5.3-flash", "anthropic/claude-opus-4"]
+            confidence_threshold = 0.85
+            "#,
+        )
+        .unwrap();
+        let config = raw.into_config(&[]).unwrap();
+        assert!(config.agent.router.enabled);
+        assert_eq!(config.agent.router.endpoint, "https://jev.example/v1/decide");
+        assert_eq!(config.agent.router.candidates.len(), 2);
+        assert!((config.agent.router.confidence_threshold - 0.85).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn router_config_rejects_threshold_out_of_range() {
+        let raw: Result<RawConfig, _> = toml::from_str(
+            "[agent.router]\nconfidence_threshold = 1.5\n",
+        );
+        assert!(raw.is_err() || raw.unwrap().into_config(&[]).is_err());
     }
 }
