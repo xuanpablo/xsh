@@ -8,6 +8,12 @@ local preserve_line_endings = require("edit_helpers").preserve_line_endings
 local SNIPPET_MAX_CHARS = 32
 local FALLBACK_VIEW_LINES = 10
 
+local EXPECTED_HASH_DESCRIPTION =
+  [[sha256 of the file content you last read (the read tool reports it as content_hash). Pass it to make the edit fail if the file changed since.]]
+
+local HASH_MISMATCH =
+  "the file changed since it was last read (expected_content_hash mismatch): read it again and retry with the new content_hash"
+
 local DIFF_OLD = { style = "diff_old", prefix = "- ", sign = "diff_old_sign", nr = "diff_old_line_nr" }
 local DIFF_NEW = { style = "diff_new", prefix = "+ ", sign = "diff_new_sign", nr = "diff_new_line_nr" }
 
@@ -196,12 +202,16 @@ local function diff_restore(blocks_from)
   end
 end
 
-local function apply_edit(path, transform)
+local function apply_edit(path, transform, expected_hash)
   path = maki.fs.abspath(path)
 
   local before, read_err = maki.fs.read(path)
   if read_err then
     return nil, "read error: " .. tostring(read_err)
+  end
+
+  if expected_hash and maki.hash.sha256(before or "") ~= expected_hash then
+    return nil, HASH_MISMATCH
   end
 
   local after, transform_err = preserve_line_endings(before, transform)
@@ -275,6 +285,10 @@ maki.api.register_tool({
         type = "boolean",
         description = "Replace all occurrences (default false)",
       },
+      expected_content_hash = {
+        type = "string",
+        description = EXPECTED_HASH_DESCRIPTION,
+      },
     },
   },
 
@@ -286,7 +300,7 @@ maki.api.register_tool({
   handler = function(input)
     local result, err = apply_edit(input.path, function(content)
       return fuzzy_replace.replace(content, input.old_string, input.new_string, input.replace_all or false)
-    end)
+    end, input.expected_content_hash)
     if not result then
       return { llm_output = err, is_error = true }
     end
@@ -338,6 +352,10 @@ register_tool_if(opts.multiedit, {
           },
         },
       },
+      expected_content_hash = {
+        type = "string",
+        description = EXPECTED_HASH_DESCRIPTION,
+      },
     },
   },
 
@@ -371,7 +389,7 @@ register_tool_if(opts.multiedit, {
         content = replaced
       end
       return content
-    end)
+    end, input.expected_content_hash)
     if not result then
       return { llm_output = err, is_error = true }
     end

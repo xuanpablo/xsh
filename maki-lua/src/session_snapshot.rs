@@ -173,7 +173,7 @@ impl HeadlessSnapshot {
 
 #[cfg(test)]
 mod tests {
-    use maki_agent::{DoneReason, TurnCompleteEvent};
+    use maki_agent::{DoneReason, TurnCompleteEvent, next_request_id};
     use maki_providers::Message;
 
     use super::*;
@@ -204,6 +204,7 @@ mod tests {
             subsidised_list_cost: None,
             context_size: Some(context_size),
             context_window: WINDOW,
+            request_id: next_request_id(),
         })))
     }
 

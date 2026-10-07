@@ -1,41 +1,65 @@
-local function truncate(text, max_lines, max_bytes)
-  if #text <= max_bytes then
-    local n = 0
-    for _ in text:gmatch("\n") do
-      n = n + 1
-    end
-    if n + 1 <= max_lines then
-      return text
-    end
-  end
-  local out = {}
-  local bytes = 0
-  local lines = 0
+local OMITTED_FMT = "[omitted %d lines]"
+local TRUNCATED_BYTES_FMT = "[truncated %d bytes]"
+
+local function split_lines(text)
+  local lines = {}
   for line in text:gmatch("([^\n]*)\n?") do
-    lines = lines + 1
-    if lines > max_lines then
+    lines[#lines + 1] = line
+  end
+  if #lines > 1 and lines[#lines] == "" then
+    lines[#lines] = nil
+  end
+  return lines
+end
+
+-- Head + tail retention: the line budget splits between the two ends and a
+-- marker line names what was dropped, so a truncated output always says so.
+local function truncate(text, max_lines, max_bytes)
+  local lines = split_lines(text)
+  if #lines <= max_lines and #text <= max_bytes then
+    return text
+  end
+
+  local head_budget = math.max(math.floor(max_lines / 2), 1)
+  local head, head_bytes = {}, 0
+  for _, line in ipairs(lines) do
+    if #head >= head_budget or head_bytes + #line + 1 > max_bytes then
       break
     end
-    local new_bytes = bytes + #line + 1
-    if new_bytes > max_bytes then
-      if #out == 0 then
-        -- Back off UTF-8 continuation bytes so no character is split in half.
-        local cut = max_bytes
-        while cut > 0 and line:find("^[\128-\191]", cut + 1) do
-          cut = cut - 1
-        end
-        out[1] = line:sub(1, cut)
-      end
+    head[#head + 1] = line
+    head_bytes = head_bytes + #line + 1
+  end
+  if #head == 0 then
+    local cut = max_bytes
+    while cut > 0 and lines[1]:find("^[\128-\191]", cut + 1) do
+      cut = cut - 1
+    end
+    return lines[1]:sub(1, cut) .. "\n\n" .. string.format(TRUNCATED_BYTES_FMT, #text - cut)
+  end
+
+  local tail, tail_bytes = {}, 0
+  local tail_budget = max_lines - #head
+  local byte_budget = max_bytes - head_bytes
+  for i = #lines, #head + 1, -1 do
+    if #tail >= tail_budget or tail_bytes + #lines[i] + 1 > byte_budget then
       break
     end
-    out[#out + 1] = line
-    bytes = new_bytes
+    tail[#tail + 1] = lines[i]
+    tail_bytes = tail_bytes + #lines[i] + 1
   end
-  local result = table.concat(out, "\n")
-  if #result < #text then
-    result = result .. "\n\n[truncated " .. (#text - #result) .. " bytes]"
+  for i = 1, math.floor(#tail / 2) do
+    tail[i], tail[#tail - i + 1] = tail[#tail - i + 1], tail[i]
   end
-  return result
+
+  local parts = { table.concat(head, "\n") }
+  local omitted = #lines - #head - #tail
+  if omitted > 0 then
+    parts[#parts + 1] = string.format(OMITTED_FMT, omitted)
+  end
+  if #tail > 0 then
+    parts[#parts + 1] = table.concat(tail, "\n")
+  end
+  return table.concat(parts, "\n")
 end
 
 return truncate

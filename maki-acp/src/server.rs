@@ -1499,6 +1499,7 @@ mod tests {
         Box::new(TurnCompleteEvent {
             message: Message::user(String::new()),
             usage: TokenUsage::default(),
+            request_id: 0,
             model: SELECTED_SPEC.to_owned(),
             cost: Some(cost),
             subsidised_list_cost: None,

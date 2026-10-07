@@ -438,7 +438,9 @@ async fn dir(lua: Lua, path: String, opts: Option<Table>) -> LuaResult<Pair<Tabl
 }
 
 /// Write {content} to the file at {path}, creating it if it does not exist
-/// or overwriting it if it does.
+/// or overwriting it if it does. The write is atomic: readers see either the
+/// old file or the complete new one. Existing file permissions are preserved;
+/// new files are owner-only on Unix.
 ///
 /// @param path string Destination file path. `~/` is expanded.
 /// @param content string Text to write.
@@ -449,8 +451,9 @@ async fn dir(lua: Lua, path: String, opts: Option<Table>) -> LuaResult<Pair<Tabl
 #[lua_fn(guard = FsWrite)]
 async fn write(_lua: Lua, path: String, content: String) -> LuaResult<Pair<bool>> {
     let abs = try_pair!(make_absolute(&path));
-    let result = smol::fs::write(&abs, content).await;
-    Ok(pair(touched(abs, result).await.map(|()| true)))
+    let written = abs.clone();
+    let result = smol::unblock(move || maki_storage::atomic_write(&abs, content.as_bytes())).await;
+    Ok(pair(touched(written, result).await.map(|()| true)))
 }
 
 /// Append {content} to the file at {path}, creating it (but not its parent

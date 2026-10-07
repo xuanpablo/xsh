@@ -13,7 +13,7 @@ use maki_providers::{
 };
 use maki_storage::frame::{LiveFacts, PromptFacts};
 
-use super::compaction::{self, CompactReason, CompactSteer, Compacted};
+use super::compaction::{self, CompactJob, CompactReason, CompactSteer, Compacted, Compactor};
 use super::frame::{
     FRAME_REBUILT, FrameFit, RunContextBuilder, context_update, fingerprint, fit_frame,
 };
@@ -23,16 +23,16 @@ use super::instructions::{CallInstructions, LoadedInstructions};
 use super::streaming::{StreamError, StreamRequest, stream_with_retry};
 use super::tool_dispatch::{self, RecentCalls};
 use crate::cancel::{CancelMap, CancelToken};
-use crate::router::decide::{RouterInput, route, task_summary};
-use crate::router::jev::JevClient;
 use crate::mcp::{McpSession, ToolDeferral};
 use crate::permissions::PermissionManager;
+use crate::router::decide::{RouterInput, route, task_summary};
+use crate::router::jev::JevClient;
 use crate::tools::hook::Verdict;
 use crate::tools::{Deadline, FileAccess, LocalTools, ToolAudience, ToolContext, ToolFilter};
 use crate::{
     AgentConfig, AgentError, AgentEvent, AgentInput, AgentMode, DoneReason, EventSender,
     ExtractedCommand, InputSource, InterruptSource, RunLedger, SessionMailbox, SteerKind,
-    TurnCompleteEvent,
+    TurnCompleteEvent, next_request_id,
 };
 use maki_config::{ModelPolicy, ToolOutputLines};
 use maki_storage::id::SessionRef;
@@ -67,6 +67,9 @@ const NO_FRAME: &str = "no prompt frame to send the request under";
 const MODEL_BINDING_MISMATCH: &str = "model_binding_mismatch";
 const THINKING_DROPPED: &str =
     "The prompt changed under earlier reasoning, so it was dropped to keep the session going.";
+/// Hints are keyed `plugin/slot`, so this key cannot collide with one.
+const TIME_HINT_KEY: &str = "time";
+const TIME_FORMAT: &str = "%Y-%m-%d %H:%M %Z";
 
 pub fn resolve_compaction_model(
     provider: &Arc<dyn Provider>,
@@ -174,6 +177,10 @@ pub struct Agent<'h> {
     model_policy: Arc<ModelPolicy>,
     model_sync: Option<Arc<ArcSwap<ModelSlot>>>,
     stop_continuations: u32,
+    compactor: Arc<dyn Compactor>,
+    /// Epoch seconds the session was created, so `time_context` can report
+    /// its age. `None` when the host never said, and no age is reported.
+    session_created: Option<u64>,
 }
 
 impl<'h> Agent<'h> {
@@ -218,6 +225,8 @@ impl<'h> Agent<'h> {
             model_policy: params.model_policy,
             model_sync: None,
             stop_continuations: 0,
+            compactor: Arc::new(compaction::AutoCompactor),
+            session_created: None,
         }
     }
 
@@ -225,6 +234,13 @@ impl<'h> Agent<'h> {
     /// keeps the model it started with.
     pub fn with_model_sync(mut self, slot: Arc<ArcSwap<ModelSlot>>) -> Self {
         self.model_sync = Some(slot);
+        self
+    }
+
+    /// Swaps the compaction strategy. The default summarizes the transcript
+    /// with one LLM pass ([`compaction::AutoCompactor`]).
+    pub fn with_compactor(mut self, compactor: Arc<dyn Compactor>) -> Self {
+        self.compactor = compactor;
         self
     }
 
@@ -264,6 +280,11 @@ impl<'h> Agent<'h> {
 
     pub fn with_loaded_instructions(mut self, loaded: LoadedInstructions) -> Self {
         self.loaded_instructions = loaded;
+        self
+    }
+
+    pub fn with_session_created(mut self, created_at: u64) -> Self {
+        self.session_created = Some(created_at);
         self
     }
 
@@ -442,10 +463,17 @@ impl<'h> Agent<'h> {
     /// compaction) has to remember to tell it.
     fn tell_changes(&mut self) -> Result<(), AgentError> {
         // Plan mode is in no rendered prompt, so only the agent knows it.
-        let now = LiveFacts {
+        let mut now = LiveFacts {
             plan: self.mode.plan_path().map(Path::to_path_buf),
             prompt: self.prompt_facts.clone(),
         };
+        if self.config.time_context
+            && let Some(prompt) = &mut now.prompt
+        {
+            prompt
+                .hints
+                .insert(TIME_HINT_KEY.to_owned(), self.time_hint());
+        }
         let Some(update) = self
             .history
             .told()
@@ -460,6 +488,25 @@ impl<'h> Agent<'h> {
         }
         self.history.push(update);
         Ok(())
+    }
+
+    /// What the `time` hint says: the wall clock and, when the host named the
+    /// session's birth, its age. Minute resolution, so a hint only changes
+    /// when a minute actually turned.
+    fn time_hint(&self) -> String {
+        let now = jiff::Zoned::now();
+        let mut lines = vec![format!("Current time: {}", now.strftime(TIME_FORMAT))];
+        if let Some(created) = self.session_created {
+            let elapsed = (now.timestamp().as_second() - created as i64).max(0);
+            let minutes = elapsed / 60;
+            let age = if minutes >= 60 {
+                format!("{}h {}m", minutes / 60, minutes % 60)
+            } else {
+                format!("{minutes}m")
+            };
+            lines.push(format!("Session elapsed: {age}"));
+        }
+        lines.join("\n")
     }
 
     /// Picks up a model chosen while the run was working. The prompt stays,
@@ -589,6 +636,7 @@ impl<'h> Agent<'h> {
         let Some((system, tools)) = self.history.request_prefix() else {
             return Err(no_frame());
         };
+        let request_id = next_request_id();
         let response = match stream_with_retry(
             StreamRequest {
                 provider: &*self.provider,
@@ -657,7 +705,7 @@ impl<'h> Agent<'h> {
         );
 
         // The gauge already took the provider's own count inside the stream.
-        self.emit_turn_complete(&response)?;
+        self.emit_turn_complete(&response, request_id)?;
 
         if has_tools {
             let history_len_before = self.history.len();
@@ -894,14 +942,19 @@ impl<'h> Agent<'h> {
         }
     }
 
-    fn emit_turn_complete(&self, response: &StreamResponse) -> Result<(), AgentError> {
+    fn emit_turn_complete(
+        &self,
+        response: &StreamResponse,
+        request_id: u64,
+    ) -> Result<(), AgentError> {
         let cost = self.model.billed_cost(&response.usage, self.opts.fast);
         // The ledger banks the un-subsidised list price for every model, not
         // just subsidised ones, so `Done.list_cost` is a real total on a
         // metered run instead of the auto-compaction turns alone. The two
         // agree on a subsidised model, which is why the event can narrow to
         // the reference figure the UI shows beside its `$0` bill.
-        self.ledger.add(
+        self.ledger.record(
+            request_id,
             response.usage,
             cost,
             self.model.list_cost(&response.usage, self.opts.fast),
@@ -910,6 +963,7 @@ impl<'h> Agent<'h> {
             .send(AgentEvent::TurnComplete(Box::new(TurnCompleteEvent {
                 message: response.message.clone(),
                 usage: response.usage,
+                request_id,
                 model: self.model.id.clone(),
                 cost,
                 subsidised_list_cost: self
@@ -1085,26 +1139,32 @@ impl<'h> Agent<'h> {
             usage: compaction_usage,
             summary,
             carried,
-        } = compaction::compact_history(
-            &*compact_provider,
-            &compact_model,
-            self.history,
-            &self.event_tx,
-            &hooks,
-            &self.config,
-            instructions,
-            carry_len,
-            self.timeouts.retry,
-        )
-        .await?;
+        } = self
+            .compactor
+            .compact(CompactJob {
+                provider: &*compact_provider,
+                model: &compact_model,
+                history: self.history,
+                event_tx: &self.event_tx,
+                hooks: &hooks,
+                config: &self.config,
+                instructions,
+                carry_len,
+                retry: self.timeouts.retry,
+            })
+            .await?;
         // The summariser can be a different model, so price this with
         // `compact_model` and not `self.model`. `list_cost` gates `fast`
         // against whichever one it gets, and is the un-subsidised price the
         // ledger wants either way.
         let compact_cost = compact_model.billed_cost(&compaction_usage, self.opts.fast);
         let compact_list_cost = compact_model.list_cost(&compaction_usage, self.opts.fast);
-        self.ledger
-            .add(compaction_usage, compact_cost, compact_list_cost);
+        self.ledger.record(
+            next_request_id(),
+            compaction_usage,
+            compact_cost,
+            compact_list_cost,
+        );
         let carry_from = self.history.len() - carried;
         self.rollback_len = carry_from;
         self.carry_from = carry_from;
@@ -1199,8 +1259,8 @@ fn interrupt_message(message: String, images: Vec<ImageSource>) -> Message {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
-    use std::path::Path;
     use std::io::{Read as _, Write as _};
+    use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -3489,8 +3549,7 @@ mod tests {
 
     const ROUTER_ADOPTED_MSG: &str =
         "a router pick under a matching frame is adopted between turns";
-    const ROUTER_HELD_MSG: &str =
-        "a router pick whose frame diverges must wait for the next run";
+    const ROUTER_HELD_MSG: &str = "a router pick whose frame diverges must wait for the next run";
     const ROUTER_JEV_KEY_ENV: &str = "MAKI_TEST_JEV_KEY";
 
     /// One canned Jev answer on a local port, plus how many requests it took.
@@ -3522,7 +3581,11 @@ mod tests {
         (format!("http://{addr}/v1/decide"), hits)
     }
 
-    fn router_agent_config(endpoint: String, candidates: Vec<String>, enabled: bool) -> AgentConfig {
+    fn router_agent_config(
+        endpoint: String,
+        candidates: Vec<String>,
+        enabled: bool,
+    ) -> AgentConfig {
         AgentConfig {
             router: maki_config::RouterConfig {
                 enabled,
@@ -3544,6 +3607,37 @@ mod tests {
     ) -> (Agent<'_>, flume::Receiver<Envelope>) {
         let (agent, rx) = make_agent_with(provider, model, history);
         (agent.with_config(config), rx)
+    }
+
+    fn fixed_facts_context() -> RunContextBuilder {
+        Arc::new(|_, _| RunContext {
+            system: "system".into(),
+            tools: RequestTools::default(),
+            facts: Some(PromptFacts::default()),
+            authored: String::new(),
+        })
+    }
+
+    #[test_case(true ; "on tells the clock")]
+    #[test_case(false ; "off tells nothing")]
+    fn time_context_is_opt_in(time_context: bool) {
+        let provider: Arc<dyn Provider> = Arc::new(MockProvider::new(vec![]));
+        let history = &mut History::new(Vec::new());
+        let config = AgentConfig {
+            time_context,
+            ..AgentConfig::default()
+        };
+        let (mut agent, _rx) =
+            make_agent_with_config(Arc::clone(&provider), default_model(), history, config);
+        agent.context = fixed_facts_context();
+        agent.refresh_frame().unwrap();
+        agent.tell_changes().unwrap();
+        let told_clock = history.as_slice().last().is_some_and(|m| {
+            m.is_context_update()
+                && m.first_text_content()
+                    .is_some_and(|t| t.contains("Current time"))
+        });
+        assert_eq!(told_clock, time_context);
     }
 
     #[test_case(true ; "matching_frame")]
@@ -3620,11 +3714,11 @@ mod tests {
             let provider: Arc<dyn Provider> = Arc::new(mock);
             let start = default_model();
             let (endpoint, hits) = mock_jev(&start.spec());
-            let config = router_agent_config(endpoint, vec!["anthropic/claude-opus-4-1".into()], true);
+            let config =
+                router_agent_config(endpoint, vec!["anthropic/claude-opus-4-1".into()], true);
             let history = &mut History::new(Vec::new());
             // A subagent run: not the MAIN audience, and no model_sync slot.
-            let (mut agent, _event_rx) =
-                make_agent_with_config(provider, start, history, config);
+            let (mut agent, _event_rx) = make_agent_with_config(provider, start, history, config);
             agent.audience = ToolAudience::RESEARCH_SUB;
             agent.run(default_input()).await.unwrap();
             assert_eq!(hits.load(Ordering::SeqCst), 0);

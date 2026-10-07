@@ -301,6 +301,7 @@ pub fn run(params: PrintParams) -> Result<()> {
                 }
             }
             AgentEvent::ThinkingDelta { .. } => {}
+            AgentEvent::Title { .. } => {} // display-only, no headless output
             AgentEvent::ToolPending { .. }
             | AgentEvent::ToolStart(_)
             | AgentEvent::ToolOutput { .. }

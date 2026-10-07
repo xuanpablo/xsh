@@ -117,6 +117,7 @@ The rules:
 | [`maki.env`](#maki-env) | Paths to maki's own directories (config, state, logs, legacy). |
 | [`maki.fn`](#maki-fn) | Process and environment helpers, modeled after Neovim's `vim.fn` job |
 | [`maki.fs`](#maki-fs) | File-system utilities, modelled after `vim.fs` and `vim.uv`. |
+| [`maki.hash`](#maki-hash) | Content hashing. |
 | [`maki.image`](#maki-image) | Small building blocks for working with images: probe metadata, decode |
 | [`maki.image.Image`](#maki-image-Image) | A decoded image you can inspect, resize, and re-encode. |
 | [`maki.interpreter`](#maki-interpreter) | Run Python code in a memory-safe, time-limited sandbox. |
@@ -421,7 +422,7 @@ string or a table with richer output fields.
     - `content` (`string`) Alias for llm_output (legacy).
     - `body` (`BufHandle`) Rich rendered body shown in the UI.
     - `header` (`BufHandle`) One-line header shown before the body.
-    - `format` (`string`) "plain" (default) or "markdown".
+    - `format` (`string`) "plain" (default), "markdown", or "report".
     - `annotation` (`string`) Short label shown next to the tool call.
     - `written_path` (`string`) Path of a file written by the tool.
     - `diff_path` (`string`) Path for a diff output block.
@@ -1428,6 +1429,13 @@ and tool set.
     call it, the same way `maki.api.register_tool` does. The default is the
     model alone, so a script cannot reach it through `code_execution`.
   - `name` (`string?`) display name for logs and UI.
+  - `seed` (`table?`) array of `{ role, text }` transcript entries
+    (`role` is `"user"` or `"assistant"`) the session opens with, instead
+    of a blank history. Text only: flatten tool calls into the text
+    yourself. Default: no seed.
+  - `fork_last` (`integer?`) open with the text of the parent session's
+    last N messages instead of a blank history or `seed`. Tool calls and
+    results are flattened out; consecutive same-role entries merge.
   - `audience` (`string?`) tool audience for capability gating. Default: `"general_sub"`.
   - `mcp` (`boolean?`) give the session access to MCP tools. Their
     definitions are injected automatically each turn (deferred behind
@@ -2088,6 +2096,13 @@ Requires the `run` [plugin permission](#plugin-permissions).
   - `stdout` (`string|false?`) append stdout to this path, or `false` to
     discard it.
   - `stderr` (`string|false?`) same for stderr; both may name one path.
+  - `sandbox` (`string?`) `"workspace_write"` confines the job: reads allowed
+
+  everywhere, writes only in `cwd` and tmp. Fails closed when no backend
+
+
+  is usable (macOS `sandbox-exec`, Linux `bwrap`).
+
   - `scope` (`string|table?`) job lifetime. `"task"` (default) ends the job
     with the current call. `"plugin"` keeps it alive until the plugin
     unloads or reloads. `{ session = "<id>" }` keeps it alive until that
@@ -2762,7 +2777,9 @@ maki.fs.write({path}, {content})
 ```
 
 Write {content} to the file at {path}, creating it if it does not exist
-or overwriting it if it does.
+or overwriting it if it does. The write is atomic: readers see either the
+old file or the complete new one. Existing file permissions are preserved;
+new files are owner-only on Unix.
 
 Requires the `fs_write` [plugin permission](#plugin-permissions).
 
@@ -3028,6 +3045,39 @@ for _, item in ipairs(res.items) do
   print(item.path, r and item.path:sub(r[1], r[2]))
 end
 if not res.complete then print("still scanning, ask again") end
+```
+
+
+## maki.hash {#maki-hash}
+
+Content hashing. Digests are short enough for a model to pass back as
+`expected_content_hash` on write and edit tools.
+
+```lua
+maki.hash.sha256("hello")
+```
+
+---
+
+### `maki.hash.sha256()` {#maki-hash-sha256}
+
+```lua
+maki.hash.sha256({data})
+```
+
+SHA-256 of {data} as lowercase hex, truncated to 32 characters.
+Accepts both strings and Luau buffers.
+
+**Parameters:**
+
+- `{data}` (`string|buffer`) Data to hash.
+
+**Returns:** (`string`) Hex digest.
+
+**Example:**
+
+```lua
+maki.hash.sha256("hello")
 ```
 
 
@@ -7473,46 +7523,5 @@ function ToolView.restore_markdown(output, is_error, opts)
 ### `require("maki.truncate")`
 
 ```lua
-local function truncate(text, max_lines, max_bytes)
-  if #text <= max_bytes then
-    local n = 0
-    for _ in text:gmatch("\n") do
-      n = n + 1
-    end
-    if n + 1 <= max_lines then
-      return text
-    end
-  end
-  local out = {}
-  local bytes = 0
-  local lines = 0
-  for line in text:gmatch("([^\n]*)\n?") do
-    lines = lines + 1
-    if lines > max_lines then
-      break
-    end
-    local new_bytes = bytes + #line + 1
-    if new_bytes > max_bytes then
-      if #out == 0 then
-        -- Back off UTF-8 continuation bytes so no character is split in half.
-        local cut = max_bytes
-        while cut > 0 and line:find("^[\128-\191]", cut + 1) do
-          cut = cut - 1
-        end
-        out[1] = line:sub(1, cut)
-      end
-      break
-    end
-    out[#out + 1] = line
-    bytes = new_bytes
-  end
-  local result = table.concat(out, "\n")
-  if #result < #text then
-    result = result .. "\n\n[truncated " .. (#text - #result) .. " bytes]"
-  end
-  return result
-end
-
-return truncate
 ```
 

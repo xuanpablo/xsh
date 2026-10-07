@@ -552,6 +552,7 @@ impl ToolInvocation for LuaToolInvocation {
                                 };
                                 match format {
                                     LuaOutputFormat::Markdown => ToolOutput::Markdown(inner),
+                                    LuaOutputFormat::Report => ToolOutput::Report(inner),
                                     LuaOutputFormat::Plain => ToolOutput::Plain(inner),
                                 }
                             }
@@ -668,7 +669,7 @@ fn parse_hint_content(lua: &Lua, spec: &Table) -> LuaResult<HintContent> {
 ///                                content     (string)  Alias for llm_output (legacy).
 ///                                body        (BufHandle) Rich rendered body shown in the UI.
 ///                                header      (BufHandle) One-line header shown before the body.
-///                                format      (string)  "plain" (default) or "markdown".
+///                                format      (string)  "plain" (default), "markdown", or "report".
 ///                                annotation  (string)  Short label shown next to the tool call.
 ///                                written_path (string) Path of a file written by the tool.
 ///                                diff_path   (string)  Path for a diff output block.
@@ -1648,10 +1649,12 @@ pub(crate) enum LuaOutputFormat {
     #[default]
     Plain,
     Markdown,
+    Report,
 }
 
 const LUA_FORMAT_MARKDOWN: &str = "markdown";
 const LUA_FORMAT_PLAIN: &str = "plain";
+const LUA_FORMAT_REPORT: &str = "report";
 
 pub(crate) struct DiffPayload {
     pub path: String,
@@ -1769,6 +1772,7 @@ fn extract_format(t: &mlua::Table) -> LuaOutputFormat {
     match &*s {
         LUA_FORMAT_MARKDOWN => LuaOutputFormat::Markdown,
         LUA_FORMAT_PLAIN => LuaOutputFormat::Plain,
+        LUA_FORMAT_REPORT => LuaOutputFormat::Report,
         _ => LuaOutputFormat::default(),
     }
 }
@@ -2024,6 +2028,7 @@ mod tests {
 
     #[test_case::test_case(LUA_FORMAT_MARKDOWN, LuaOutputFormat::Markdown ; "markdown")]
     #[test_case::test_case(LUA_FORMAT_PLAIN,    LuaOutputFormat::Plain    ; "plain")]
+    #[test_case::test_case(LUA_FORMAT_REPORT,   LuaOutputFormat::Report   ; "report")]
     #[test_case::test_case("unknown",           LuaOutputFormat::Plain    ; "unknown_defaults_to_plain")]
     fn extract_format_known_values(value: &str, expected: LuaOutputFormat) {
         let lua = Lua::new();

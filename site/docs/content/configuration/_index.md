@@ -122,6 +122,7 @@ How many lines of output to show per tool in the UI. All values are `usize` with
 | Field | Type | Default | Min | Description |
 |-------|------|---------|-----|-------------|
 | `max_output_bytes` | usize | `51200` | 1024 | Max tool output size (bytes) |
+| `spill_bytes` | usize | `65536` | 0 | Tool outputs above this many bytes are written whole to .maki/spill/<id> and replaced in the transcript by their head plus a locator (0 disables) |
 | `max_output_lines` | usize | `2000` | 10 | Max tool output lines |
 | `max_continuation_turns` | u32 | `3` | 1 | Max automatic continuation turns |
 | `max_turn_output` | u32 | `32768` | 1024 | Output tokens one turn asks for, raised where an effort level needs the room and capped by the model's own limit |
@@ -129,7 +130,10 @@ How many lines of output to show per tool in the UI. All values are `usize` with
 | `compaction_instructions` | String | `none` | - | Extra instructions appended to the compaction summary prompt |
 | `post_compaction_instructions` | String | `none` | - | Extra instructions the agent receives after any compaction (e.g. re-read plan.md) |
 | `stale_read_check` | bool | `true` | - | Require re-reading a file that changed on disk before editing it |
+| `session_titles` | bool | `true` | - | Generate a short session title with a cheap model call after the first user turn |
+| `time_context` | bool | `false` | - | Tell the model the current time and session elapsed in a context update before each user step |
 | `rtk` | bool | `true` | - | Rewrite bash commands with [rtk](https://github.com/rtk-ai/rtk) when it is installed |
+| `sandbox` | String | `none` | - | Default sandbox mode for bash commands ("workspace_write" allows reads everywhere but writes only in the working dir; fails closed when no backend is available) |
 
 ### `agent.router`
 
@@ -279,6 +283,13 @@ maki.setup({
 |-------|------|---------|-----|-------------|
 | `max_items` | integer | `10` | 1 | Rows the completion popup shows at once. |
 
+### `plugins.context_guard`
+
+| Field | Type | Default | Min | Description |
+|-------|------|---------|-----|-------------|
+| `compact_instructions` | boolean | `true` | - | Append guard instructions to every compaction summary prompt. |
+| `nudge_pct` | integer | `80` | 10 | Context fill percentage that triggers the wrap-up nudge. |
+
 ### `plugins.edit`
 
 | Field | Type | Default | Min | Description |
@@ -286,6 +297,20 @@ maki.setup({
 | `edit_lines` | boolean | `true` | - | Provide the `edit_lines` tool. |
 | `insert_lines` | boolean | `false` | - | Provide the opt-in `insert_lines` tool. |
 | `multiedit` | boolean | `true` | - | Provide the `multiedit` tool. |
+
+### `plugins.fleet`
+
+| Field | Type | Default | Min | Description |
+|-------|------|---------|-----|-------------|
+| `max_concurrent` | integer | `4` | 1 | Max concurrently running fleet subagents. |
+
+### `plugins.git`
+
+| Field | Type | Default | Min | Description |
+|-------|------|---------|-----|-------------|
+| `max_output_bytes` | integer | - | - | Override `agent.max_output_bytes` for this tool. |
+| `max_output_lines` | integer | - | - | Override `agent.max_output_lines` for this tool. |
+| `timeout_secs` | integer | `30` | 5 | Kill a git command after this many seconds. |
 
 ### `plugins.glob`
 
@@ -329,6 +354,14 @@ maki.setup({
 |-------|------|---------|-----|-------------|
 | `allow_model` | boolean | `false` | - | Expose a `model` input that overrides the subagent model. Only enable if you trust callers to pick an exact model themselves. |
 | `max_concurrent` | integer | `8` | 1 | Max concurrently running subagents. |
+
+### `plugins.verify`
+
+| Field | Type | Default | Min | Description |
+|-------|------|---------|-----|-------------|
+| `max_output_bytes` | integer | - | - | Override `agent.max_output_bytes` for this tool. |
+| `max_output_lines` | integer | - | - | Override `agent.max_output_lines` for this tool. |
+| `timeout_secs` | integer | `300` | 5 | Kill the test run after this many seconds. |
 
 ### `plugins.webfetch`
 

@@ -250,6 +250,20 @@ local function collect_commands(node, source)
   return out
 end
 
+local function parse_sandbox(input, ctx)
+  local mode = input.sandbox
+  if mode == nil and ctx then
+    local config = ctx:config()
+    if config then
+      mode = config.sandbox
+    end
+  end
+  if mode == nil or mode == "workspace_write" then
+    return mode
+  end
+  return nil, "error: sandbox must be \"workspace_write\""
+end
+
 local description = [[Execute a bash command.
 Commands run in the session's working directory (see Environment) by default.
 
@@ -287,6 +301,11 @@ maki.api.register_tool({
       workdir = { type = "string", description = "Working directory (default: cwd)" },
       tail = { type = "integer", description = "Return only the last N lines" },
       description = { type = "string", description = "Short description (3-5 words) of what the command does" },
+      sandbox = {
+        type = "string",
+        enum = { "workspace_write" },
+        description = "Confine the command: reads allowed everywhere, writes only in the working dir",
+      },
     },
   },
   permission = "run",
@@ -296,14 +315,18 @@ maki.api.register_tool({
       return nil
     end
 
+    -- A sandboxed run cannot escape the workspace, so the parse failures that
+    -- normally force a prompt fall back to the regular allow rules instead.
+    local relaxed = input.sandbox == "workspace_write"
+
     local parser = maki.treesitter.get_parser(command, "bash")
     if not parser then
-      return { scopes = { command }, force_prompt = true }
+      return { scopes = { command }, force_prompt = not relaxed }
     end
 
     local root = parser:parse()[1]:root()
     if root:has_error() or is_complex(root) then
-      return { scopes = { command }, force_prompt = true }
+      return { scopes = { command }, force_prompt = not relaxed }
     end
 
     local segments = collect_commands(root, command)
@@ -325,6 +348,9 @@ maki.api.register_tool({
     end
     if input.tail then
       hints[#hints + 1] = "tail " .. input.tail
+    end
+    if input.sandbox then
+      hints[#hints + 1] = "sandboxed"
     end
     if #hints == 0 then
       return s
@@ -372,6 +398,10 @@ maki.api.register_tool({
     local command, workdir = parse_cd_hint(input)
     local timeout_secs = input.timeout or opts.timeout_secs
     local max_lines, max_bytes = output_limits.resolve(opts, ctx)
+    local sandbox, sandbox_err = parse_sandbox(input, ctx)
+    if sandbox_err then
+      return { llm_output = sandbox_err, is_error = true }
+    end
 
     ctx:set_deadline(timeout_secs)
 
@@ -433,6 +463,7 @@ maki.api.register_tool({
 
     local job, err = maki.fn.jobstart(command, {
       cwd = workdir,
+      sandbox = sandbox,
       env = { GIT_TERMINAL_PROMPT = "0" },
       on_stdout = function(_, line)
         if not has_output then

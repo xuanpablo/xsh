@@ -1,6 +1,11 @@
 local shorten_path = require("maki.shorten_path")
 local ToolView = require("maki.tool_view")
 
+local EXPECTED_HASH_DESCRIPTION =
+  [[sha256 of the file content you last read (the read tool reports it as content_hash). Pass it to make the write fail if the file changed since.]]
+
+local HASH_MISMATCH = "the file changed since it was last read (expected_content_hash mismatch): read it again and retry with the new content_hash"
+
 local DESCRIPTION = [[Write content to a file, replacing existing content.
 
 - Creates parent directories if needed.
@@ -51,6 +56,10 @@ maki.api.register_tool({
         type = "boolean",
         description = "Add content to the end of the file instead of replacing it",
       },
+      expected_content_hash = {
+        type = "string",
+        description = EXPECTED_HASH_DESCRIPTION,
+      },
     },
   },
 
@@ -79,6 +88,13 @@ maki.api.register_tool({
     end
 
     local path = maki.fs.abspath(raw)
+
+    if input.expected_content_hash then
+      local current = maki.fs.read(path)
+      if maki.hash.sha256(current or "") ~= input.expected_content_hash then
+        return { llm_output = HASH_MISMATCH, is_error = true }
+      end
+    end
 
     local parent = maki.fs.dirname(path)
     if parent then

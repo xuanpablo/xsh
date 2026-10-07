@@ -721,6 +721,7 @@ impl PermissionManager {
         };
         let allowed = |source: &'static str| {
             maki_otel::emit::tool_decision(&tool_string, maki_otel::emit::DECISION_ACCEPT, source);
+            maki_otel::emit::permission_grant(&tool_string, source);
             Ok(())
         };
         let by_rule = || {

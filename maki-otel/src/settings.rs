@@ -32,6 +32,7 @@ pub const ENV_METRICS_INCLUDE_SESSION_ID: &str = "OTEL_METRICS_INCLUDE_SESSION_I
 pub const ENV_METRICS_INCLUDE_VERSION: &str = "OTEL_METRICS_INCLUDE_VERSION";
 pub const ENV_LOG_USER_PROMPTS: &str = "OTEL_LOG_USER_PROMPTS";
 pub const ENV_LOG_TOOL_DETAILS: &str = "OTEL_LOG_TOOL_DETAILS";
+pub const ENV_SESSION_EVENTS: &str = "OTEL_SESSION_EVENTS";
 pub const ENV_CONTENT_MAX_LENGTH: &str = "MAKI_OTEL_CONTENT_MAX_LENGTH";
 
 pub const DEFAULT_SERVICE_NAME: &str = "maki";
@@ -197,6 +198,7 @@ pub struct Settings {
     pub metrics_include_version: bool,
     pub log_user_prompts: bool,
     pub log_tool_details: bool,
+    pub session_events: bool,
     pub content_max_length: usize,
 }
 
@@ -606,6 +608,7 @@ pub fn resolve<F: Fn(&str) -> Option<String>>(
         )?,
         log_user_prompts: flag(ENV_LOG_USER_PROMPTS, lua.log_user_prompts, false)?,
         log_tool_details: flag(ENV_LOG_TOOL_DETAILS, lua.log_tool_details, false)?,
+        session_events: flag(ENV_SESSION_EVENTS, lua.session_events, false)?,
         content_max_length,
     }))
 }

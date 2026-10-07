@@ -32,6 +32,8 @@ pub use cancel::{CancelMap, CancelToken, CancelTrigger};
 pub use mailbox::{MailboxError, SessionMailbox};
 pub use maki_config::{AgentConfig, PermissionsConfig, SessionDefaults, ToolOutputLines};
 pub mod command;
+pub mod jobs;
+pub use jobs::{CancelOutcome, JobError, JobId, JobInfo, JobOwner, JobRegistry, JobSpec, PollSnapshot};
 pub mod diff;
 pub mod permissions;
 pub mod prompt;
@@ -51,7 +53,7 @@ pub use types::{
     GrepFileEntry, GrepLine, GrepMatchGroup, InstructionBlock, NO_FILES_FOUND, RunLedger,
     RunTotals, SessionEndReason, SessionEvents, SharedBuf, SnapshotLine, SnapshotSpan, SpanColor,
     SpanStyle, SteerKind, SubagentInfo, TextOutput, ToolDoneEvent, ToolInput, ToolOutput,
-    ToolStartEvent, TurnCompleteEvent, UiWaker, event_stream,
+    ToolStartEvent, TurnCompleteEvent, UiWaker, event_stream, next_request_id,
 };
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]

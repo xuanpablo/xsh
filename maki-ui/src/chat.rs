@@ -193,6 +193,8 @@ impl Chat {
                 return ChatEventResult::QueueItemConsumed { text, images };
             }
             AgentEvent::QueueDrained => {}
+            // Host metadata; the app stores it before the chat sees it.
+            AgentEvent::Title { .. } => {}
             AgentEvent::Retry { .. } => unreachable!("handled before handle_event"),
             AgentEvent::Done { .. } => {
                 self.messages_panel.flush();
@@ -901,6 +903,7 @@ mod tests {
                     ..Default::default()
                 },
                 usage: Default::default(),
+                request_id: 0,
                 model: String::new(),
                 cost: None,
                 subsidised_list_cost: None,

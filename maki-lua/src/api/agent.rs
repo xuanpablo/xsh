@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use async_lock::Mutex as AsyncMutex;
 use futures::future::{Either, select};
+use maki_agent::agent::live_history;
 use maki_agent::agent::{LoadedInstructions, tool_dispatch};
 use maki_agent::cancel::{CancelMap, CancelSlot};
 use maki_agent::tools::interpreter_bridge;
@@ -27,7 +28,8 @@ use maki_lua_macro::{lua_class, lua_fn, lua_table};
 use maki_providers::model::ModelTier;
 use maki_providers::provider;
 use maki_providers::{
-    ContentBlock, ContextGauge, Model, RequestOptions, Role, ThinkingConfig, TokenUsage, add_cost,
+    ContentBlock, ContextGauge, Message, Model, RequestOptions, Role, ThinkingConfig, TokenUsage,
+    add_cost,
 };
 use maki_storage::id::MakiId;
 use maki_storage::sessions::StoredThinking;
@@ -65,6 +67,79 @@ fn resolve_model_from_ctx(ctx: &AgentContext, tier: Option<&str>) -> Result<Mode
             Model::from_tier_with_policy(slug, effective, &ctx.model_policy)
                 .map_err(|e| e.to_string())
         })
+}
+
+const SEED_ROLE_ERR: &str = "seed entry requires `role` = \"user\" or \"assistant\"";
+const SEED_TEXT_ERR: &str = "seed entry requires string `text`";
+const FORK_SEED_CONFLICT_ERR: &str = "fork_last and seed are mutually exclusive";
+const FORK_NO_SESSION_ERR: &str = "fork_last requires a parent session";
+const FORK_NOT_LIVE_ERR: &str = "parent session history is not live";
+
+/// A fork seed: text-only transcript entries the child opens with instead of
+/// a blank history. Tool blocks are the caller's to flatten; a bare
+/// `tool_use` with no matching result would 400 the first request.
+fn seed_messages(tbl: &Table) -> Result<Vec<Message>, String> {
+    let mut messages = Vec::new();
+    for entry in tbl.sequence_values::<Table>() {
+        let entry = entry.map_err(|e| format!("seed must be an array of tables: {e}"))?;
+        let role = match entry.get::<String>("role") {
+            Ok(r) if r == "user" => Role::User,
+            Ok(r) if r == "assistant" => Role::Assistant,
+            _ => return Err(SEED_ROLE_ERR.to_owned()),
+        };
+        let text = entry
+            .get::<String>("text")
+            .map_err(|_| SEED_TEXT_ERR.to_owned())?;
+        messages.push(Message {
+            role,
+            content: vec![ContentBlock::Text { text }],
+            ..Default::default()
+        });
+    }
+    Ok(messages)
+}
+
+/// Flattens the parent's last `last` messages into the same text-only shape
+/// `seed` uses: same rationale (a dangling `tool_use` would 400 the first
+/// request), but the flattening is done here so callers cannot forget it.
+/// Consecutive same-role entries merge, so a run of tool results becomes one
+/// user message instead of a block the provider may reject.
+fn fork_messages(parent: &[Message], last: usize) -> Vec<Message> {
+    let start = parent.len().saturating_sub(last);
+    let mut out: Vec<Message> = Vec::new();
+    for msg in &parent[start..] {
+        if !matches!(msg.role, Role::User | Role::Assistant) {
+            continue;
+        }
+        let role = std::mem::discriminant(&msg.role);
+        let text: Vec<&str> = msg
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } if !text.is_empty() => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        if text.is_empty() {
+            continue;
+        }
+        let joined = text.join("\n\n");
+        match out.last_mut() {
+            Some(prev) if std::mem::discriminant(&prev.role) == role => {
+                let ContentBlock::Text { text } = &mut prev.content[0] else {
+                    unreachable!("seeded messages carry a single text block");
+                };
+                text.push_str("\n\n");
+                text.push_str(&joined);
+            }
+            _ => out.push(Message {
+                role: msg.role.clone(),
+                content: vec![ContentBlock::Text { text: joined }],
+                ..Default::default()
+            }),
+        }
+    }
+    out
 }
 
 fn model_to_lua_table(lua: &Lua, model: &Model) -> LuaResult<Table> {
@@ -423,6 +498,13 @@ async fn call_tool(
 ///     call it, the same way `maki.api.register_tool` does. The default is the
 ///     model alone, so a script cannot reach it through `code_execution`.
 ///   `name` (string?) - display name for logs and UI.
+///   `seed` (table?) - array of `{ role, text }` transcript entries
+///     (`role` is `"user"` or `"assistant"`) the session opens with, instead
+///     of a blank history. Text only: flatten tool calls into the text
+///     yourself. Default: no seed.
+///   `fork_last` (integer?) - open with the text of the parent session's
+///     last N messages instead of a blank history or `seed`. Tool calls and
+///     results are flattened out; consecutive same-role entries merge.
 ///   `audience` (string?) - tool audience for capability gating. Default: `"general_sub"`.
 ///   `mcp` (boolean?) - give the session access to MCP tools. Their
 ///     definitions are injected automatically each turn (deferred behind
@@ -459,6 +541,11 @@ async fn session(
     let system: Option<String> = opts.get("system")?;
     let tools_val: Option<LuaValue> = opts.get("tools")?;
     let local_tools_tbl: Option<Table> = opts.get("local_tools")?;
+    let seed: Option<Vec<Message>> = match opts.get::<Option<Table>>("seed")? {
+        Some(tbl) => Some(try_pair!(seed_messages(&tbl))),
+        None => None,
+    };
+    let fork_last: Option<usize> = opts.get("fork_last")?;
     let name: Option<String> = opts.get("name")?;
     let thinking_val: Option<LuaValue> = opts.get("thinking")?;
     let audience = match opts.get::<Option<String>>("audience")? {
@@ -564,6 +651,24 @@ async fn session(
     });
     let opts = RequestOptions { thinking, fast }.clamped(&model);
 
+    // Fork and seed are two ways to open on anything but a blank history;
+    // both at once would leave the split of the transcript undefined.
+    let history = match fork_last {
+        None => History::new(seed.unwrap_or_default()),
+        Some(last) => {
+            if seed.is_some() {
+                return Ok(err_pair(FORK_SEED_CONFLICT_ERR));
+            }
+            let Some(session) = agent_ctx.session_id.as_ref() else {
+                return Ok(err_pair(FORK_NO_SESSION_ERR));
+            };
+            let Some(messages) = live_history(session.id()) else {
+                return Ok(err_pair(FORK_NOT_LIVE_ERR));
+            };
+            History::new(fork_messages(&messages, last))
+        }
+    };
+
     let (stream_guard, sub_events) = event_stream();
     let sub_event_tx = stream_guard.sender(agent_ctx.event_tx.run_id());
     let parent_tx = agent_ctx.event_tx.clone();
@@ -638,7 +743,7 @@ async fn session(
             .as_ref()
             .filter(|_| mcp_enabled)
             .map(McpSession::fresh),
-        history: History::new(Vec::new()),
+        history,
         gauge: ContextGauge::default(),
         loaded_instructions: LoadedInstructions::new(),
         sub_event_tx,
@@ -1025,8 +1130,7 @@ fn call_local_tool(
 
 #[cfg(test)]
 mod tests {
-    use maki_agent::{DoneReason, TurnCompleteEvent};
-    use maki_providers::Message;
+    use maki_agent::{DoneReason, TurnCompleteEvent, next_request_id};
     use serde_json::json;
 
     use super::*;
@@ -1035,6 +1139,53 @@ mod tests {
         let lua = Lua::new();
         let f: Function = lua.load(src).eval().unwrap();
         call_local_tool(&lua.weak(), &f, &input)
+    }
+
+    #[test]
+    fn fork_messages_flattens_and_merges() {
+        let msg = |role: Role, text: &str| Message {
+            role,
+            content: vec![ContentBlock::Text { text: text.into() }],
+            ..Default::default()
+        };
+        let tool_call = Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Text {
+                    text: "running".into(),
+                },
+                ContentBlock::tool_use("id", "bash", json!({"cmd": "ls"})),
+            ],
+            ..Default::default()
+        };
+        let parent = vec![
+            msg(Role::User, "first"),
+            msg(Role::Assistant, "second"),
+            tool_call,
+            msg(Role::User, "third"),
+            msg(Role::User, "fourth"),
+        ];
+
+        let forked = fork_messages(&parent, 4);
+        let flattened = |m: &Message| match &m.content[0] {
+            ContentBlock::Text { text } => text.clone(),
+            _ => unreachable!(),
+        };
+        let role = |m: &Message| match m.role {
+            Role::User => "user",
+            _ => "assistant",
+        };
+        assert_eq!(
+            forked
+                .iter()
+                .map(|m| (role(m), flattened(m)))
+                .collect::<Vec<_>>(),
+            vec![
+                ("assistant", "second\n\nrunning".to_owned()),
+                ("user", "third\n\nfourth".to_owned()),
+            ]
+        );
+        assert!(fork_messages(&parent, 0).is_empty());
     }
 
     #[test]
@@ -1082,6 +1233,7 @@ mod tests {
             subsidised_list_cost: None,
             context_size: None,
             context_window: 0,
+            request_id: next_request_id(),
         }))
     }
 

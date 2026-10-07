@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::env;
 
 use maki_config::AgentConfig;
+use maki_providers::provider::BoxFuture;
 use maki_providers::retry::RetryPolicy;
 use maki_providers::{
     ContentBlock, ContextGauge, IMAGE_PLACEHOLDER, Message, Model, RequestOptions, Role,
@@ -15,6 +16,7 @@ use super::history::{History, remove_orphaned_tool_results, strip_thinking};
 use super::hook::{AgentHooks, AgentSlot};
 use super::streaming::{StreamError, StreamRequest, min_output, stream_with_retry};
 use crate::mcp::McpSession;
+use crate::next_request_id;
 use crate::prompt::COMPACTION_USER;
 use crate::tools::hook::Verdict;
 use crate::tools::truncate_bytes;
@@ -171,12 +173,54 @@ pub(super) fn continue_message(config: &AgentConfig, added: Option<&str>) -> Str
     }
 }
 
-pub(super) struct Compacted {
+pub struct Compacted {
     pub usage: TokenUsage,
     pub summary: String,
     /// How many unanswered messages follow the summary. Context updates are
     /// never among them, see [`History::restart`].
     pub carried: usize,
+}
+
+/// The whole ask handed to a [`Compactor`]: one struct so the trait stays a
+/// single method however the seam grows.
+pub struct CompactJob<'a> {
+    pub provider: &'a dyn maki_providers::provider::Provider,
+    pub model: &'a Model,
+    pub history: &'a mut History,
+    pub event_tx: &'a EventSender,
+    pub hooks: &'a AgentHooks<'a>,
+    pub config: &'a AgentConfig,
+    pub instructions: Option<&'a str>,
+    pub carry_len: usize,
+    pub retry: RetryPolicy,
+}
+
+/// Pluggable compaction seam. The default is [`AutoCompactor`]; an embedder
+/// swaps it with `Agent::with_compactor` to summarize (or shrink) the
+/// transcript its own way.
+pub trait Compactor: Send + Sync {
+    fn compact<'a>(&'a self, job: CompactJob<'a>) -> BoxFuture<'a, Result<Compacted, AgentError>>;
+}
+
+/// The built-in summarizer: one LLM pass over the transcript, pruning on
+/// overflow by retrying with less to send.
+#[derive(Default)]
+pub struct AutoCompactor;
+
+impl Compactor for AutoCompactor {
+    fn compact<'a>(&'a self, job: CompactJob<'a>) -> BoxFuture<'a, Result<Compacted, AgentError>> {
+        Box::pin(compact_history(
+            job.provider,
+            job.model,
+            job.history,
+            job.event_tx,
+            job.hooks,
+            job.config,
+            job.instructions,
+            job.carry_len,
+            job.retry,
+        ))
+    }
 }
 
 /// Replaces `history` with a summary of itself, retrying on overflow by
@@ -272,6 +316,7 @@ fn finish_compact(
     compact_start: std::time::Instant,
     model: &Model,
 ) -> Result<Compacted, AgentError> {
+    let before = history.len();
     let _ = event_tx.send(AgentEvent::TurnComplete(Box::new(TurnCompleteEvent {
         message: response.message.clone(),
         usage: response.usage,
@@ -280,6 +325,7 @@ fn finish_compact(
         subsidised_list_cost: model.subsidised_list_cost(&response.usage, false),
         context_size: Some(response.usage.output),
         context_window: model.context_window,
+        request_id: next_request_id(),
     })));
 
     // Swapping the history for a summary the model never wrote would throw the
@@ -295,6 +341,7 @@ fn finish_compact(
     let summary_len = new_history.len();
     new_history.extend_from_slice(&history.as_slice()[summarized..]);
     history.restart(new_history);
+    maki_otel::emit::compaction(before, history.len(), compact_start.elapsed());
     info!(
         model = %model.id,
         duration_ms = compact_start.elapsed().as_millis() as u64,

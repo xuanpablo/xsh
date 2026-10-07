@@ -831,6 +831,7 @@ mod tests {
     ) -> TurnCompleteEvent {
         TurnCompleteEvent {
             message: Message::default(),
+            request_id: 0,
             usage: maki_providers::TokenUsage {
                 input: 1_000,
                 output: 200,

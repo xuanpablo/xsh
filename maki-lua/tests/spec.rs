@@ -5,8 +5,14 @@ use maki_lua::PluginHost;
 use test_case::test_case;
 
 #[test_case("completion", include_str!("../../plugins/completion/tests/spec.lua") ; "completion_plugin_spec")]
+#[test_case("context_guard", include_str!("../../plugins/context_guard/tests/spec.lua") ; "context_guard_plugin_spec")]
+#[test_case("doctor", include_str!("../../plugins/doctor/tests/spec.lua") ; "doctor_plugin_spec")]
+#[test_case("git", include_str!("../../plugins/git/tests/spec.lua") ; "git_plugin_spec")]
 #[test_case("edit", include_str!("../../plugins/edit/tests/spec.lua") ; "edit_plugin_spec")]
 #[test_case("index", include_str!("../../plugins/index/tests/spec.lua") ; "index_plugin_spec")]
+#[test_case("notebook", include_str!("../../plugins/notebook/tests/spec.lua") ; "notebook_plugin_spec")]
+#[test_case("patch", include_str!("../../plugins/patch/tests/spec.lua") ; "patch_plugin_spec")]
+#[test_case("verify", include_str!("../../plugins/verify/tests/spec.lua") ; "verify_plugin_spec")]
 #[test_case("lib", include_str!("../../plugins/lib/tests/spec.lua") ; "lib_spec")]
 #[test_case("list", include_str!("../../plugins/list/tests/spec.lua") ; "list_plugin_spec")]
 #[test_case("memory", include_str!("../../plugins/memory/tests/spec.lua") ; "memory_plugin_spec")]
@@ -19,6 +25,7 @@ use test_case::test_case;
 #[test_case("webfetch", include_str!("../../plugins/webfetch/tests/spec.lua") ; "webfetch_plugin_spec")]
 #[test_case("websearch", include_str!("../../plugins/websearch/tests/spec.lua") ; "websearch_plugin_spec")]
 #[test_case("write", include_str!("../../plugins/write/tests/spec.lua") ; "write_plugin_spec")]
+#[test_case("workflow", include_str!("../../plugins/workflow/tests/spec.lua") ; "workflow_plugin_spec")]
 fn plugin_spec(name: &str, spec: &str) {
     let reg = Arc::new(ToolRegistry::new());
     let host = PluginHost::new(Arc::clone(&reg)).unwrap();

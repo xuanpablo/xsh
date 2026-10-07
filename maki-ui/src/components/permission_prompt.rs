@@ -138,7 +138,25 @@ struct Request {
 pub struct AnsweredRequest {
     pub id: String,
     pub subagent_id: Option<String>,
+    pub tool: ToolKey,
     pub answer: PermissionAnswer,
+}
+
+/// Native tools whose side effects reach the filesystem. Everything else
+/// (reads, searches, subagents) can be replayed from the transcript, but a
+/// half-applied write is not, so only these force a durability checkpoint.
+const FS_MUTATING_TOOLS: [&str; 7] = [
+    "bash",
+    "bash_bg",
+    "batch",
+    "code_execution",
+    "edit",
+    "patch",
+    "write",
+];
+
+pub(crate) fn mutates_fs(tool: &ToolKey) -> bool {
+    matches!(tool, ToolKey::Native(name) if FS_MUTATING_TOOLS.contains(&name.as_ref()))
 }
 
 /// Every request parks a tool call until it is answered, so asks that arrive
@@ -229,6 +247,7 @@ impl PermissionPrompt {
         Some(AnsweredRequest {
             id: request.id,
             subagent_id: request.subagent_id,
+            tool: request.tool,
             answer,
         })
     }

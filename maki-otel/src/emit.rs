@@ -7,7 +7,8 @@ use std::time::Duration;
 use crate::attr::AttrSet;
 use crate::handle;
 use crate::logs::{
-    EVENT_API_ERROR, EVENT_API_REQUEST, EVENT_TOOL_DECISION, EVENT_TOOL_RESULT, EVENT_USER_PROMPT,
+    EVENT_API_ERROR, EVENT_API_REQUEST, EVENT_COMPACTION, EVENT_PERMISSION_GRANT,
+    EVENT_TOOL_CALL_START, EVENT_TOOL_DECISION, EVENT_TOOL_RESULT, EVENT_USER_PROMPT,
 };
 use crate::metrics::{
     ACTIVE_TIME, COMMIT_COUNT, COST_USAGE, LINES_OF_CODE, PULL_REQUEST_COUNT, SESSION_COUNT,
@@ -54,6 +55,8 @@ const KEY_COST_USD: &str = "cost_usd";
 const KEY_PROMPT: &str = "prompt";
 const KEY_PROMPT_LENGTH: &str = "prompt_length";
 const KEY_TOOL_INPUT: &str = "tool_input";
+const KEY_MESSAGES_BEFORE: &str = "messages_before";
+const KEY_MESSAGES_AFTER: &str = "messages_after";
 
 /// The one entry point for session starts: the id is set before counting, so
 /// a counted session can never miss it.
@@ -187,7 +190,7 @@ pub fn tool_result(result: &ToolResult<'_>) {
 }
 
 /// Both the event and the counter: dashboards want the rate, audits the detail.
-pub fn tool_decision(tool_name: &str, decision: &'static str, source: &'static str) {
+pub fn tool_decision(tool_name: &str, decision: &'static str, source: &str) {
     let Some(handle) = handle() else {
         return;
     };
@@ -197,6 +200,60 @@ pub fn tool_decision(tool_name: &str, decision: &'static str, source: &'static s
         .with(KEY_SOURCE, source);
     handle.event(EVENT_TOOL_DECISION, attrs.clone());
     handle.record(&TOOL_DECISION, Value::Int(1), attrs);
+}
+
+/// The session event stream's complement to [`tool_result`]: the moment a
+/// call begins. Gated on `OTEL_SESSION_EVENTS`, and carries only the tool
+/// name and where it came from.
+pub fn tool_call_start(tool_name: &str, tool_source: &str) {
+    let Some(handle) = handle() else {
+        return;
+    };
+    if !handle.session_events() {
+        return;
+    }
+    handle.event(
+        EVENT_TOOL_CALL_START,
+        AttrSet::new()
+            .with(KEY_TOOL_NAME, handle.truncate(tool_name))
+            .with(KEY_TOOL_SOURCE, tool_source),
+    );
+}
+
+/// A permission check passed and the call went ahead. Gated on
+/// `OTEL_SESSION_EVENTS`.
+pub fn permission_grant(tool_name: &str, source: &str) {
+    let Some(handle) = handle() else {
+        return;
+    };
+    if !handle.session_events() {
+        return;
+    }
+    handle.event(
+        EVENT_PERMISSION_GRANT,
+        AttrSet::new()
+            .with(KEY_TOOL_NAME, handle.truncate(tool_name))
+            .with(KEY_SOURCE, source),
+    );
+}
+
+/// History size either side of a compaction, plus how long it took. Message
+/// counts only: the transcript itself never leaves the machine. Gated on
+/// `OTEL_SESSION_EVENTS`.
+pub fn compaction(before: usize, after: usize, duration: Duration) {
+    let Some(handle) = handle() else {
+        return;
+    };
+    if !handle.session_events() {
+        return;
+    }
+    handle.event(
+        EVENT_COMPACTION,
+        AttrSet::new()
+            .with(KEY_MESSAGES_BEFORE, before)
+            .with(KEY_MESSAGES_AFTER, after)
+            .with(KEY_DURATION_MS, duration.as_millis() as u64),
+    );
 }
 
 pub fn lines_of_code(added: u64, removed: u64) {

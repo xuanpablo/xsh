@@ -28,11 +28,7 @@ case("truncate_within_limits_unchanged", function()
 end)
 
 case("truncate_exceeds_line_limit", function()
-  local result = truncate("aaa\nbbb\nccc\nddd", 2, 1000)
-  assert(result:find("aaa", 1, true), "should keep first line")
-  assert(result:find("bbb", 1, true), "should keep second line")
-  assert(not result:find("ccc", 1, true), "should drop third line")
-  assert(result:find("%[truncated %d+ bytes%]"), "should have truncation marker")
+  eq(truncate("aaa\nbbb\nccc\nddd", 2, 1000), "aaa\n[omitted 2 lines]\nddd")
 end)
 
 local function truncated(kept, dropped_bytes)
@@ -43,9 +39,9 @@ case("truncate_single_oversized_line_keeps_prefix", function()
   eq(truncate(string.rep("x", 200), 1000, 50), truncated(string.rep("x", 50), 150))
 end)
 
-case("truncate_oversized_line_after_kept_lines_is_dropped", function()
+case("truncate_oversized_line_between_kept_ends_is_omitted", function()
   local text = "short\n" .. string.rep("x", 100) .. "\nlast"
-  eq(truncate(text, 1000, 20), truncated("short", 106))
+  eq(truncate(text, 1000, 20), "short\n[omitted 1 lines]\nlast")
 end)
 
 case("truncate_oversized_line_cuts_on_utf8_boundary", function()
@@ -54,7 +50,7 @@ end)
 
 case("truncate_trailing_newlines_counted", function()
   local result = truncate("a\n\n\n\n\n", 2, 1000)
-  assert(result:find("%[truncated"), "trailing newlines should count as lines")
+  assert(result:find("%[omitted %d+ lines%]"), "trailing newlines should count as lines")
 end)
 
 case("output_limits_tail_keeps_the_last_n_lines", function()

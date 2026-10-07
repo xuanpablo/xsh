@@ -366,6 +366,7 @@ fn turn_complete(usage: TokenUsage, model: &str, cost: Option<f64>) -> AgentEven
     AgentEvent::TurnComplete(Box::new(TurnCompleteEvent {
         message: Default::default(),
         usage,
+        request_id: maki_agent::next_request_id(),
         model: model.into(),
         cost,
         subsidised_list_cost: None,

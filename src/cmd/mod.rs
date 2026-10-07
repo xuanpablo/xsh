@@ -230,6 +230,12 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             let storage = StateDir::resolve().context("resolve data directory")?;
             match action {
                 SessionAction::List { global, json } => session::list(global, json, &storage)?,
+                SessionAction::Search {
+                    query,
+                    global,
+                    json,
+                    limit,
+                } => session::search(&query, global, json, limit, &storage)?,
                 SessionAction::Delete { session_id, force } => {
                     session::delete(&session_id, force, &storage)?
                 }

@@ -21,6 +21,16 @@ const SCHEMA_ROOT_ERROR: &str = "output_schema must have type object";
 const STRUCTURED_MISSING_ERROR: &str = "subagent finished without calling structured_output";
 const STRUCTURED_INVALID_ERROR: &str = "subagent result does not match output_schema";
 const SUMMARY_MISSING_ERROR: &str = "subagent finished without providing a summary";
+const REPORT_MISSING_ERROR: &str = "subagent finished without calling task_report";
+const RESUME_NOT_FOUND_ERROR: &str =
+    "no resumable task with that id (expired or not a report task)";
+const FORK_DEPTH_ERROR: &str = "fork_depth must be a positive integer";
+const REPORT_HEADING: &str = "## Task report";
+const REPORT_SUMMARY: &str = "fixed the parser";
+const REPORT_DETAILS: &str = "see parser.lua:42";
+const RESUME_TEXT: &str = "continued answer";
+/// Mirrors the plugin's `MAX_RESUMABLE` parking cap.
+const MAX_RESUMABLE: usize = 4;
 const UNKNOWN_SUBAGENT_ERR: &str = "unknown subagent type: bogus";
 const SUB_AGENT_ERROR_PREFIX: &str = "sub-agent error: ";
 
@@ -48,6 +58,9 @@ const SCENARIO_PARTIAL_ERROR: &str = "partial_error";
 const SCENARIO_RAISE: &str = "raise";
 const SCENARIO_NO_SUMMARY: &str = "no_summary";
 const SCENARIO_NO_SUMMARY_THEN_RECOVER: &str = "no_summary_then_recover";
+const SCENARIO_REPORT_OK: &str = "report_ok";
+const SCENARIO_REPORT_NEVER: &str = "report_never";
+const SCENARIO_RESUME: &str = "resume";
 
 /// Stubs keyed by `opts.name` (the task's `description`). `maki.json` and
 /// `maki.async` stay real so schema validation and semaphore behavior are tested.
@@ -139,10 +152,28 @@ behaviors.raise = function(sess, msg)
   error("@RAISE_MSG@")
 end
 
+behaviors.report_ok = function(sess, msg)
+  sess.calls = (sess.calls or 0) + 1
+  if sess.calls == 1 then
+    sess.opts.local_tools.task_report.handler({ summary = "@REPORT_SUMMARY@", details = "@REPORT_DETAILS@" })
+    return { text = "" }
+  end
+  return { text = "@RESUME_TEXT@" }
+end
+
+behaviors.report_never = function(sess, msg)
+  return { text = "never reported" }
+end
+
+behaviors.resume = function(sess, msg)
+  return { text = "@RESUME_TEXT@" }
+end
+
 maki.agent.session = function(ctx, opts)
   recorder.sessions = recorder.sessions + 1
   recorder.has_local_tools = opts.local_tools ~= nil
   recorder.thinking = opts.thinking
+  recorder.session_opts = opts
   local sess = { opts = opts }
   function sess:prompt(msg)
     recorder.prompts[#recorder.prompts + 1] = msg
@@ -174,6 +205,9 @@ maki.api.register_tool({
       released = recorder.released,
       sem_size = recorder.sem_size,
     }
+    if recorder.session_opts then
+      snap.fork_last = recorder.session_opts.fork_last
+    end
     if recorder.resolve_opts then
       snap.resolve_opts = recorder.resolve_opts
     end
@@ -200,7 +234,10 @@ fn load_task_host_with_opts(
         .replace("@PROMPT_ERR@", PROMPT_ERR_MSG)
         .replace("@RAISE_MSG@", RAISE_MSG)
         .replace("@PARTIAL_TEXT@", PARTIAL_TEXT)
-        .replace("@CANCELLED_ERR@", CANCELLED_ERR);
+        .replace("@CANCELLED_ERR@", CANCELLED_ERR)
+        .replace("@REPORT_SUMMARY@", REPORT_SUMMARY)
+        .replace("@REPORT_DETAILS@", REPORT_DETAILS)
+        .replace("@RESUME_TEXT@", RESUME_TEXT);
     host.load_source_with_opts(
         "task_policy",
         &format!("{prelude}\n{TASK_PLUGIN_SRC}"),
@@ -517,4 +554,116 @@ fn raising_prompt_does_not_leak_semaphore_permit() {
     // Pool is full again (released == acquired), so this cannot block.
     let out = exec_tool(&reg, TASK_TOOL, task_input(SCENARIO_PLAIN, None)).unwrap();
     assert_eq!(out, PLAIN_TEXT);
+}
+
+#[test]
+fn fork_depth_forwards_last_to_the_session() {
+    let (reg, _host) = load_task_host();
+    let mut input = task_input(SCENARIO_PLAIN, None);
+    input["fork_depth"] = json!(3);
+    exec_tool(&reg, TASK_TOOL, input).expect("fork task failed");
+    let snap = probe(&reg);
+    assert_eq!(snap["fork_last"], json!(3));
+}
+
+#[test]
+fn fork_depth_omitted_spawns_blank() {
+    let (reg, _host) = load_task_host();
+    exec_tool(&reg, TASK_TOOL, task_input(SCENARIO_PLAIN, None)).expect("task failed");
+    let snap = probe(&reg);
+    assert_eq!(snap["fork_last"], json!(null));
+}
+
+#[test_case::test_case(json!(0) ; "zero")]
+#[test_case::test_case(json!(-2) ; "negative")]
+fn bad_fork_depth_errors_before_any_session(depth: Value) {
+    let (reg, _host) = load_task_host();
+    let mut input = task_input(SCENARIO_PLAIN, None);
+    input["fork_depth"] = depth;
+    let err = exec_tool(&reg, TASK_TOOL, input).unwrap_err();
+    assert_eq!(err, FORK_DEPTH_ERROR);
+    let snap = probe(&reg);
+    assert_eq!(snap["sessions"], json!(0));
+}
+
+#[test]
+fn report_task_returns_report_block_and_parks_child() {
+    let (reg, _host) = load_task_host();
+    let mut input = task_input(SCENARIO_REPORT_OK, None);
+    input["report"] = json!(true);
+    let out = exec_tool(&reg, TASK_TOOL, input).expect("report task failed");
+    assert!(out.contains(REPORT_HEADING), "got: {out}");
+    assert!(
+        out.contains(REPORT_SUMMARY) && out.contains(REPORT_DETAILS),
+        "got: {out}"
+    );
+    let task_id = out
+        .split('"')
+        .find(|s| s.starts_with("task-"))
+        .expect("task id missing from output")
+        .to_owned();
+
+    let snap = probe(&reg);
+    assert_eq!(snap["closed"], json!(0), "report child must stay parked");
+    // Resume continues the same child rather than spawning a sibling.
+    let resume =
+        json!({ "description": SCENARIO_RESUME, "prompt": "go deeper", "resume": task_id });
+    let out = exec_tool(&reg, TASK_TOOL, resume).expect("resume failed");
+    assert!(out.contains(RESUME_TEXT), "got: {out}");
+    let snap = probe(&reg);
+    assert_eq!(snap["sessions"], json!(1));
+    assert_eq!(snap["prompts"][1], json!("go deeper"));
+}
+
+#[test]
+fn report_task_nudges_then_errors_without_task_report() {
+    let (reg, _host) = load_task_host();
+    let mut input = task_input(SCENARIO_REPORT_NEVER, None);
+    input["report"] = json!(true);
+    let err = exec_tool(&reg, TASK_TOOL, input).unwrap_err();
+    assert_eq!(err, REPORT_MISSING_ERROR);
+
+    let snap = probe(&reg);
+    assert_eq!(snap["prompt_count"], json!(1 + MAX_STRUCTURED_RETRIES));
+    assert_eq!(
+        snap["closed"],
+        json!(1),
+        "a child that never reported is closed"
+    );
+}
+
+#[test]
+fn resume_unknown_id_errors() {
+    let (reg, _host) = load_task_host();
+    let input =
+        json!({ "description": SCENARIO_RESUME, "prompt": "go deeper", "resume": "task-99" });
+    let err = exec_tool(&reg, TASK_TOOL, input).unwrap_err();
+    assert_eq!(err, RESUME_NOT_FOUND_ERROR);
+}
+
+/// `MAX_RESUMABLE + 1` report tasks park in sequence: the oldest is evicted
+/// (closed) and its id stops being resumable.
+#[test]
+fn parking_cap_closes_the_oldest_child() {
+    let (reg, _host) = load_task_host();
+    let mut ids = Vec::new();
+    for _ in 0..=MAX_RESUMABLE {
+        let mut input = task_input(SCENARIO_REPORT_OK, None);
+        input["report"] = json!(true);
+        let out = exec_tool(&reg, TASK_TOOL, input).expect("report task failed");
+        ids.push(
+            out.split('"')
+                .find(|s| s.starts_with("task-"))
+                .expect("task id missing")
+                .to_owned(),
+        );
+    }
+    assert_eq!(ids.len(), MAX_RESUMABLE + 1);
+    assert!(ids.windows(2).all(|w| w[0] != w[1]), "ids must be unique");
+
+    let snap = probe(&reg);
+    assert_eq!(snap["closed"], json!(1), "only the evicted child is closed");
+    let input = json!({ "description": SCENARIO_RESUME, "prompt": "again", "resume": ids[0] });
+    let err = exec_tool(&reg, TASK_TOOL, input).unwrap_err();
+    assert_eq!(err, RESUME_NOT_FOUND_ERROR);
 }

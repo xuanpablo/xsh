@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
@@ -277,6 +277,51 @@ pub fn delete_provider_credentials(dir: &StateDir, slug: &str) -> Result<bool, S
     delete_auth(&auth_path(dir, slug))
 }
 
+/// A settings value of `ref:<name>` points at a secret kept here instead.
+pub const REF_PREFIX: &str = "ref:";
+const SECRETS_FILE: &str = "secrets";
+
+fn secrets_path(dir: &StateDir) -> PathBuf {
+    auth_path(dir, SECRETS_FILE)
+}
+
+pub fn load_secret(dir: &StateDir, name: &str) -> Option<String> {
+    let map: HashMap<String, String> = load_auth(&secrets_path(dir))?;
+    map.get(name).cloned()
+}
+
+pub fn save_secret(dir: &StateDir, name: &str, value: &str) -> Result<(), StorageError> {
+    let path = secrets_path(dir);
+    let mut map: HashMap<String, String> = load_auth(&path).unwrap_or_default();
+    map.insert(name.to_string(), value.to_string());
+    save_auth(&path, &map)
+}
+
+pub fn delete_secret(dir: &StateDir, name: &str) -> Result<bool, StorageError> {
+    let path = secrets_path(dir);
+    let mut map: HashMap<String, String> = match load_auth(&path) {
+        Some(map) => map,
+        None => return Ok(false),
+    };
+    if map.remove(name).is_none() {
+        return Ok(false);
+    }
+    if map.is_empty() {
+        return delete_auth(&path);
+    }
+    save_auth(&path, &map)?;
+    Ok(true)
+}
+
+/// A credential value as written in settings: `ref:<name>` resolves from the
+/// secret store, anything else is the literal value.
+pub fn resolve_credential(dir: &StateDir, value: &str) -> Option<String> {
+    match value.strip_prefix(REF_PREFIX) {
+        Some(name) => load_secret(dir, name),
+        None => Some(value.to_string()),
+    }
+}
+
 /// Whatever a plugin provider decided its credentials are.
 ///
 /// No schema, so a plugin gets the object back exactly as it wrote it. An
@@ -379,6 +424,35 @@ mod tests {
         save_plugin_auth(&dir, PLUGIN_SLUG, &data).unwrap();
 
         assert_eq!(load_plugin_auth(&dir, PLUGIN_SLUG).unwrap(), data);
+    }
+
+    #[test]
+    fn secrets_round_trip_and_resolution() {
+        let tmp = TempDir::new().unwrap();
+        let dir = StateDir::from_path(tmp.path().to_path_buf());
+        save_secret(&dir, "openai-key", "sk-live").unwrap();
+        save_secret(&dir, "anthropic-key", "sk-ant").unwrap();
+
+        let literal = "sk-plain";
+        let missing_ref = format!("{REF_PREFIX}nope");
+        let openai_ref = format!("{REF_PREFIX}openai-key");
+        assert_eq!(
+            resolve_credential(&dir, literal).as_deref(),
+            Some("sk-plain")
+        );
+        assert_eq!(
+            resolve_credential(&dir, &openai_ref).as_deref(),
+            Some("sk-live")
+        );
+        assert_eq!(resolve_credential(&dir, &missing_ref), None);
+
+        assert!(delete_secret(&dir, "openai-key").unwrap());
+        assert_eq!(resolve_credential(&dir, &openai_ref), None);
+        assert!(load_secret(&dir, "anthropic-key").is_some());
+
+        assert!(delete_secret(&dir, "anthropic-key").unwrap());
+        assert!(!secrets_path(&dir).exists());
+        assert!(!delete_secret(&dir, "anthropic-key").unwrap());
     }
 
     /// A plugin names its own slug, so its store must not be where maki keeps

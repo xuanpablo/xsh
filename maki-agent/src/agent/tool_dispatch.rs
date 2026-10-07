@@ -7,9 +7,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
+
+use maki_providers::Message;
 
 use crate::agent::CallInstructions;
+use crate::agent::spill;
 use crate::mcp::{McpSession, TOOL_SEARCH_TOOL_NAME, ToolDeferral, UNKNOWN_MCP, is_wire_name};
 use crate::task_set::TaskSet;
 use crate::tools::hook::{Authority, HookCall, HookStage, OUTPUT_IS_ERROR, OUTPUT_TEXT, Verdict};
@@ -26,6 +29,11 @@ use maki_storage::id::SessionRef;
 
 const DOOM_LOOP_THRESHOLD: usize = 3;
 const DOOM_LOOP_MESSAGE: &str = "You have called this tool with the same (or nearly identical) input 3 times in a row. You are stuck in a loop. Break out and try a different approach.";
+/// Advisory, before the doom-loop hard error: after this many identical
+/// repeats the call still runs, but the model is told a repeat is happening
+/// while it can still change course.
+const REPEAT_NUDGE_THRESHOLD: usize = 1;
+const REPEAT_NUDGE: &str = "You called `{tool}` with the same input {count} times in a row. If the result is not what you need, change your approach instead of repeating the identical call.";
 const UNKNOWN_TOOL_PREFIX: &str = "unknown tool";
 /// A frame never drops a tool, so a server that went away, or stopped
 /// publishing one, leaves its names listed. Saying so stops the model from
@@ -80,14 +88,18 @@ impl RecentCalls {
     }
 
     fn is_doom_loop(&self, name: &str, input: &Value) -> bool {
+        self.consecutive_repeats(name, input) >= DOOM_LOOP_THRESHOLD - 1
+    }
+
+    /// Trailing run of calls with this name and input, not counting the call
+    /// being checked.
+    fn consecutive_repeats(&self, name: &str, input: &Value) -> usize {
         let hash = Self::hash_input(input);
-        self.0.len() >= DOOM_LOOP_THRESHOLD - 1
-            && self
-                .0
-                .iter()
-                .rev()
-                .take(DOOM_LOOP_THRESHOLD - 1)
-                .all(|(n, h)| n == name && *h == hash)
+        self.0
+            .iter()
+            .rev()
+            .take_while(|(n, h)| n == name && *h == hash)
+            .count()
     }
 
     fn record(&mut self, name: String, input: &Value) {
@@ -159,6 +171,9 @@ pub async fn run(
     };
 
     let source = maki_otel::enabled().then(|| resolved.route.source());
+    if let Some(source) = &source {
+        maki_otel::emit::tool_call_start(name, source);
+    }
     let started = Instant::now();
     let mut done = run_inner(resolved, id, &input, ctx, origin, ask.as_deref()).await;
     let took = started.elapsed();
@@ -945,6 +960,7 @@ pub(super) async fn process_tool_calls(
 
     let mut immediate_errors: Vec<ToolDoneEvent> = Vec::new();
     let mut runnable: Vec<(String, String, Value)> = Vec::new();
+    let mut nudge: Option<String> = None;
 
     for (id, name, input) in tool_uses {
         debug!(
@@ -953,10 +969,18 @@ pub(super) async fn process_tool_calls(
             input_preview = %crate::tools::schema::preview(&input.to_string()),
             "parsing tool call"
         );
+        let repeats = recent_calls.consecutive_repeats(&name, &input);
         if recent_calls.is_doom_loop(&name, &input) {
             warn!(tool = %name, "doom loop detected, skipping execution");
             immediate_errors.push(ToolDoneEvent::error(id.clone(), DOOM_LOOP_MESSAGE));
         } else {
+            if repeats >= REPEAT_NUDGE_THRESHOLD {
+                nudge = Some(
+                    REPEAT_NUDGE
+                        .replacen("{tool}", &name, 1)
+                        .replace("{count}", &(repeats + 1).to_string()),
+                );
+            }
             runnable.push((id, name.clone(), input.clone()));
         }
         recent_calls.record(name, &input);
@@ -977,7 +1001,8 @@ pub(super) async fn process_tool_calls(
             ..ctx.clone()
         };
         set.spawn(async move {
-            let done = run(id, &name, &input, &tool_ctx, CallOrigin::Model).await;
+            let mut done = run(id, &name, &input, &tool_ctx, CallOrigin::Model).await;
+            spill::apply(&mut done, tool_ctx.config.spill_bytes);
             event_tx_clone.try_send(AgentEvent::ToolDone(Box::new(done.clone())));
             done
         });
@@ -1004,6 +1029,10 @@ pub(super) async fn process_tool_calls(
         message: Box::new(tool_msg.clone()),
     })?;
     history.push(tool_msg);
+    if let Some(nudge) = nudge {
+        info!(nudge = %nudge, "repeat tool call detected, nudging the model");
+        history.push(Message::synthetic(nudge));
+    }
     Ok(())
 }
 
@@ -1091,9 +1120,11 @@ mod tests {
     use maki_config::{
         Effect, Permission, PermissionRule, PermissionsConfig, ProjectConfig, ToolKey,
     };
+    use maki_providers::{ContentBlock, Role, StreamResponse};
     use test_case::test_case;
 
     use super::*;
+    use crate::agent::history::History;
     use crate::cancel::CancelToken;
     use crate::mcp::test_support::stub_session;
     use crate::mcp::{ToolDeferral, tool_names};
@@ -1178,6 +1209,62 @@ mod tests {
             .collect();
         let input = serde_json::json!({"path": "/a"});
         assert_eq!(recent_calls(&entries).is_doom_loop(name, &input), expected);
+    }
+
+    #[test_case(&[("read", "/a")], 1 ; "one_prior_identical_call")]
+    #[test_case(&[("read", "/a"), ("read", "/a")], 2 ; "run_of_two")]
+    #[test_case(&[("read", "/a"), ("read", "/b")], 0 ; "different_input_resets")]
+    #[test_case(&[], 0 ; "empty_history")]
+    fn consecutive_repeats_counts_trailing_run(history: &[(&str, &str)], expected: usize) {
+        let entries: Vec<_> = history
+            .iter()
+            .map(|(n, p)| (*n, serde_json::json!({"path": p})))
+            .collect();
+        let input = serde_json::json!({"path": "/a"});
+        assert_eq!(
+            recent_calls(&entries).consecutive_repeats("read", &input),
+            expected
+        );
+    }
+
+    #[test]
+    fn repeated_call_appends_advisory_note_after_results() {
+        smol::block_on(async {
+            const ECHO_TOOL: &str = "echo";
+            const NUDGE_COUNT: &str = "same input 2 times";
+
+            let (tx, _rx) = flume::unbounded();
+            let mut ctx = local_ctx(ECHO_TOOL, |_| Ok("done".to_owned()));
+            ctx.event_tx = EventSender::new(tx, 0);
+            let input = serde_json::json!({"path": "/a"});
+            let mut recent = RecentCalls::new();
+            recent.record(ECHO_TOOL.to_owned(), &input);
+
+            let response = StreamResponse {
+                message: Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::ToolUse {
+                        id: TEST_ID.to_owned(),
+                        name: ECHO_TOOL.to_owned(),
+                        input: input.clone(),
+                        thought_signature: None,
+                    }],
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+
+            let mut history = History::new(Vec::new());
+            process_tool_calls(response, &mut recent, &mut history, &ctx.event_tx, &ctx)
+                .await
+                .unwrap();
+
+            let messages = history.as_slice();
+            assert_eq!(messages.len(), 3, "assistant, results, then the note");
+            let note = messages.last().unwrap().first_text_content().unwrap();
+            assert!(note.contains(ECHO_TOOL), "got: {note}");
+            assert!(note.contains(NUDGE_COUNT), "got: {note}");
+        });
     }
 
     #[test_case(json!({"path": "/a "}), json!({"path": "\n/a"}), true ; "trimmed_whitespace")]

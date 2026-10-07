@@ -17,6 +17,7 @@ pub mod encode;
 pub mod logs;
 pub mod metrics;
 pub mod pipeline;
+pub mod redact;
 pub mod resource;
 pub mod settings;
 pub mod transport;
@@ -69,6 +70,7 @@ struct Handle {
     metrics_include_version: bool,
     log_user_prompts: bool,
     log_tool_details: bool,
+    session_events: bool,
     content_max_length: usize,
 }
 
@@ -134,6 +136,7 @@ pub fn init_with_env<F: Fn(&str) -> Option<String>>(
         metrics_include_version: settings.metrics_include_version,
         log_user_prompts: settings.log_user_prompts,
         log_tool_details: settings.log_tool_details,
+        session_events: settings.session_events,
         content_max_length: settings.content_max_length,
     };
     if HANDLE.set(handle).is_err() {
@@ -178,6 +181,14 @@ fn terminal_type() -> String {
 /// Whether tool input is wanted, so callers can skip serializing it.
 pub fn logs_tool_details() -> bool {
     handle().is_some_and(|h| h.log_tool_details)
+}
+
+/// Whether the session event stream (`maki.tool_call_start`,
+/// `maki.permission_grant`, `maki.compaction`) is exported. Those events
+/// carry only tool names, counts and durations — never paths, environment
+/// values or file contents.
+pub fn session_events() -> bool {
+    handle().is_some_and(|h| h.session_events)
 }
 
 /// Attaches the session to everything emitted from now on.
@@ -260,7 +271,11 @@ impl Handle {
     }
 
     fn truncate(&self, text: &str) -> String {
-        truncate_chars(text, self.content_max_length)
+        truncate_chars(&crate::redact::redact(text), self.content_max_length)
+    }
+
+    pub(crate) fn session_events(&self) -> bool {
+        self.session_events
     }
 }
 

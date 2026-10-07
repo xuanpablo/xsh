@@ -17,6 +17,7 @@ use mlua::{Function, Lua, RegistryKey, Result as LuaResult, Table, Value};
 use shell_words::join as shell_join;
 
 use crate::api::fs::expand_tilde;
+use crate::api::sandbox::{self, WORKSPACE_WRITE};
 use crate::api::util::command::{UiAction, ui_roundtrip, ui_send};
 use crate::api::util::pair::{Pair, err_pair, try_pair};
 use crate::plugin_permissions::{Permission, PluginPermissions, denied_error};
@@ -39,6 +40,7 @@ const JOB_WAIT_TIMEOUT_ERR: &str = "jobwait: timed out";
 const BLANK_NAME_ERR: &str = "jobstart: name must be non-blank";
 const EMPTY_ARGV_ERR: &str = "jobstart: argv table must not be empty";
 const CMD_TYPE_ERR: &str = "jobstart: cmd must be a shell string or an argv table";
+const SANDBOX_MODE_ERR: &str = "jobstart: sandbox must be \"workspace_write\"";
 
 #[derive(Clone)]
 pub(crate) enum JobEvent {
@@ -123,6 +125,7 @@ pub(crate) struct JobSpec {
     pub cmd: JobCommand,
     pub name: Option<String>,
     pub cwd: Option<String>,
+    pub sandbox: bool,
     pub env: Option<HashMap<String, String>>,
     pub stdout: Redirect,
     pub stderr: Redirect,
@@ -138,6 +141,7 @@ impl JobSpec {
             cmd: cmd.into(),
             name: None,
             cwd: None,
+            sandbox: false,
             env: None,
             stdout: Redirect::Capture,
             stderr: Redirect::Capture,
@@ -275,6 +279,7 @@ impl JobStore {
             cmd,
             name,
             cwd,
+            sandbox,
             env,
             stdout,
             stderr,
@@ -282,7 +287,16 @@ impl JobStore {
             on_stderr,
             on_exit,
         } = spec;
+        let cwd_dir = cwd.as_deref().map(expand_tilde);
+        if let Some(ref dir) = cwd_dir
+            && !dir.is_dir()
+        {
+            return Err(format!("cwd is not a directory: {}", dir.display()));
+        }
         let mut command = cmd.build();
+        if sandbox {
+            sandbox::wrap(&mut command, cwd_dir.as_deref()).map_err(|e| e.to_string())?;
+        }
         strip_provider_keys(&mut command)
             .stdout(stdout.stdio()?)
             .stderr(stderr.stdio()?)
@@ -300,10 +314,7 @@ impl JobStore {
             }
         }
 
-        if let Some(dir) = cwd.as_deref().map(expand_tilde) {
-            if !dir.is_dir() {
-                return Err(format!("cwd is not a directory: {}", dir.display()));
-            }
+        if let Some(dir) = cwd_dir {
             command.current_dir(dir);
         }
         if let Some(ref env_map) = env {
@@ -371,7 +382,11 @@ impl JobStore {
             id,
             JobMeta {
                 owner,
-                command: cmd.display(),
+                command: if sandbox {
+                    format!("sandbox {}", cmd.display())
+                } else {
+                    cmd.display()
+                },
                 name,
                 pid,
                 started: Instant::now(),
@@ -843,6 +858,9 @@ fn kill_job(job: &JobMeta) {
 ///   `stdout` (string|false?) append stdout to this path, or `false` to
 ///     discard it.
 ///   `stderr` (string|false?) same for stderr; both may name one path.
+///   `sandbox` (string?) `"workspace_write"` confines the job: reads allowed
+///   everywhere, writes only in `cwd` and tmp. Fails closed when no backend
+///   is usable (macOS `sandbox-exec`, Linux `bwrap`).
 ///   `scope` (string|table?) job lifetime. `"task"` (default) ends the job
 ///     with the current call. `"plugin"` keeps it alive until the plugin
 ///     unloads or reloads. `{ session = "<id>" }` keeps it alive until that
@@ -880,6 +898,12 @@ fn jobstart(
 
     if let Some(ref opts) = opts {
         spec.cwd = opts.get("cwd").ok();
+        if let Some(mode) = opts.get::<Option<String>>("sandbox")? {
+            if mode != WORKSPACE_WRITE {
+                return Err(mlua::Error::runtime(SANDBOX_MODE_ERR));
+            }
+            spec.sandbox = true;
+        }
         spec.env = opts
             .get::<Table>("env")
             .ok()

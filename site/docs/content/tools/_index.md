@@ -7,7 +7,7 @@ group = "Reference"
 
 # Tools
 
-Maki ships with 21 built-in tools in this reference (20 on by default, 1 opt-in via plugin options). Tools marked **opt-in** are off until you enable them under `plugins` in [Configuration](/docs/configuration/).
+Maki ships with 32 built-in tools in this reference (31 on by default, 1 opt-in via plugin options). Tools marked **opt-in** are off until you enable them under `plugins` in [Configuration](/docs/configuration/).
 
 ## File Operations
 
@@ -20,6 +20,7 @@ Commands run in the session's working directory (see Environment) by default.
 |-----------|------|----------|---------|-------------|
 | `command` | string | yes |  | The bash command to execute |
 | `description` | string | no |  | Short description (3-5 words) of what the command does |
+| `sandbox` | string | no |  | Confine the command: reads allowed everywhere, writes only in the working dir |
 | `tail` | integer | no |  | Return only the last N lines |
 | `timeout` | integer | no | 120 | Timeout in seconds |
 | `workdir` | string | no | cwd | Working directory |
@@ -50,6 +51,7 @@ Write content to a file, replacing existing content.
 |-----------|------|----------|-------------|
 | `append` | boolean | no | Add content to the end of the file instead of replacing it |
 | `content` | string | yes | The complete file content to write |
+| `expected_content_hash` | string | no | sha256 of the file content you last read (the read tool reports it as content_hash). Pass it to make the write fail if the file changed since. |
 | `path` | string | yes | Absolute path to the file |
 
 ### `edit` {#edit}
@@ -58,6 +60,7 @@ Replace an exact string match in a file.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
+| `expected_content_hash` | string | no |  | sha256 of the file content you last read (the read tool reports it as content_hash). Pass it to make the edit fail if the file changed since. |
 | `new_string` | string | yes |  | Replacement string |
 | `old_string` | string | yes |  | Exact string to find (must match uniquely unless replace_all is true) |
 | `path` | string | yes |  | Absolute path to the file |
@@ -71,6 +74,7 @@ Prefer this over edit when making multiple changes to the same file.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `edits` | array | yes | Array of edit operations to apply sequentially |
+| `expected_content_hash` | string | no | sha256 of the file content you last read (the read tool reports it as content_hash). Pass it to make the edit fail if the file changed since. |
 | `path` | string | yes | Absolute path to the file |
 
 ### `edit_lines` {#edit_lines}
@@ -172,9 +176,12 @@ Launch an autonomous subagent to perform tasks independently. Best combined with
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `description` | string | yes | Short (3-5 words) description of the task |
+| `fork_depth` | integer | no | Fork: seed the subagent with the last N messages of this session's transcript (text only) instead of starting blank. Omit to spawn fresh. |
 | `model_tier` | string | no | Model tier (optional, omit to use current model, capped at current tier):<br>- "strong" (e.g. Opus): Deep reasoning, complex architecture, subtle bugs, most critical sections. ~5x cost of medium.<br>- "medium" (e.g. Sonnet): Balanced. Refactors, features, multi-file changes.<br>- "weak" (e.g. Haiku): Fast/cheap. Search, summarize, boilerplate, simple edits. |
 | `output_schema` | string | no | JSON Schema (object) the subagent's final result must match. When set, the result is returned as a validated JSON string. |
 | `prompt` | string | yes | Detailed task prompt for the agent |
+| `report` | boolean | no | Require the subagent to call its task_report tool before finishing. The report comes back as a distinct block plus a task id you can resume with `resume`. |
+| `resume` | string | no | Task id returned by an earlier report task. Continues that subagent with this prompt instead of spawning a new one. |
 | `subagent_type` | string | no | Subagent type: "research" (read-only, default) or "general" (can modify files) |
 | `thinking` | string | no | Thinking: off\|adaptive\|minimal\|low\|medium\|high\|xhigh\|max\|int budget. Omit to inherit parent; capped at parent. |
 
@@ -225,3 +232,124 @@ Search the web for real-time information using Exa AI.
 |-----------|------|----------|---------|-------------|
 | `num_results` | integer | no | 8 | Number of results to return |
 | `query` | string | yes |  | Search query |
+
+## Additional tools
+
+### `apply_patch` {#apply_patch}
+
+Apply a multi-file patch: `*** Begin Patch` (V4A) or unified diff.
+Per-file atomic: a file is written only when every hunk in it applied.
+Use when `edit` fails to match, or when one call must touch several files.
+Prefer `edit` for simple single-file replacements.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `patch` | string | yes | Patch text: `*** Begin Patch` (V4A) or unified diff |
+| `workdir` | string | yes | Base directory for relative paths, e.g. the session cwd |
+
+### `context_guard` {#context_guard}
+
+Report how full the context window is. The harness nudges you automatically at the threshold; call this to check earlier.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+
+### `doctor` {#doctor}
+
+Check that this project's toolchain is installed and dependencies are present.
+Covers node, rust, go, and python projects. With `fix = true`, runs the detected install
+commands (npm install, cargo fetch, ...). Run this before starting work in an unfamiliar checkout.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `fix` | boolean | no |  | Run the install commands for any missing dependencies |
+| `workdir` | string | no | cwd | Project directory |
+
+### `edit_notebook` {#edit_notebook}
+
+Edit a Jupyter notebook cell: replace its source, insert a new cell, or delete one.
+Read the notebook first to get 1-based cell numbers.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `action` | string | no | One of: "replace" (default), "insert_after", "delete" |
+| `cell` | integer | yes | 1-based cell index |
+| `cell_type` | string | no | For insert_after: "code" (default), "markdown", "raw" |
+| `path` | string | yes | Path to the .ipynb file |
+| `source` | string | no | New cell source (replace, insert_after) |
+
+### `fleet` {#fleet}
+
+Run one task prompt against many targets in parallel, one subagent each.
+`items` are short target identifiers (file paths, module names, queries) appended to the prompt.
+Use for bulk refactors, multi-target research, or repeated audits. For a single task use `task`.
+Results come back labeled per item; failed items are marked and do not abort the rest.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `description` | string | yes | Short (3-5 words) description of the fleet run |
+| `items` | array | yes | Targets to fan out over |
+| `output_schema` | string | no | JSON Schema each subagent's final result must match; results come back as validated JSON |
+| `prompt` | string | yes | Task prompt; the target is appended as `Target: <item>` |
+| `subagent_type` | string | no | Subagent type for each run: "research" (default) or "general" |
+
+### `git_commit` {#git_commit}
+
+Stage all working tree changes and create a commit.
+Do NOT commit secrets. Use git_status and git_diff first to know what you are committing.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `message` | string | yes |  | Commit message (first line = subject) |
+| `workdir` | string | no | cwd | Repo directory |
+
+### `git_diff` {#git_diff}
+
+Show the diff of working tree changes. Set `staged` for the staged diff; `path` narrows to one path.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `path` | string | no |  | Limit the diff to this path |
+| `staged` | boolean | no |  | Diff the index against HEAD instead of the working tree |
+| `workdir` | string | no | cwd | Repo directory |
+
+### `git_status` {#git_status}
+
+Show branch, upstream drift, and a labeled list of working tree changes. Cheaper and more structured than bash git.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `workdir` | string | no | cwd | Repo directory |
+
+### `read_notebook` {#read_notebook}
+
+Read a Jupyter notebook: numbered cells with their type, source, and an output preview.
+Use the cell numbers with `edit_notebook`. Do NOT use `read` on .ipynb files: raw JSON wastes context.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `max_output_chars` | integer | no | 300 | Cap per output preview |
+| `path` | string | yes |  | Path to the .ipynb file |
+
+### `spill` {#spill}
+
+Read back a spilled tool output: a result too large for the transcript was saved to .maki/spill/<id> and replaced by its head plus a locator.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `id` | string | yes | Spill id from the locator line |
+| `limit` | integer | no | Max lines to read (0 reads to the end, capped) |
+| `offset` | integer | no | First line to read (1-indexed, default 1) |
+
+### `verify` {#verify}
+
+Run the project's tests and get failures back, trimmed to the relevant part.
+- Autodetects the runner: justfile `test` recipe, npm test, pytest, cargo test.
+- Pass `command` to override, e.g. `just lint` or `pytest tests/test_x.py -q`.
+- Prefer this over bash for test runs: the output is failure-focused.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `command` | string | no | autodetect | Test command to run |
+| `tail` | integer | no |  | Return only the last N lines |
+| `workdir` | string | no | cwd | Working directory |

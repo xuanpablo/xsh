@@ -451,6 +451,11 @@ pub struct Session<M, U, T> {
     /// erase a locally minted void: cursor validity is the pair.
     #[serde(skip)]
     rewrites: u64,
+    /// Set when a file-mutating tool ran since the last durability
+    /// checkpoint, so a save before the next model request or tool side
+    /// effect knows to force the write instead of waiting for a soft one.
+    #[serde(skip)]
+    mutating_since_flush: bool,
 }
 
 #[derive(Serialize)]
@@ -1366,6 +1371,7 @@ where
         content_revision: 0,
         epoch: next_epoch(),
         rewrites: 0,
+        mutating_since_flush: false,
     })
 }
 
@@ -1558,7 +1564,7 @@ fn load_scan_cache(dir: &Path) -> ScanCache {
         .unwrap_or_default()
 }
 
-fn file_signature(path: &Path) -> Option<(u64, u64)> {
+pub(crate) fn file_signature(path: &Path) -> Option<(u64, u64)> {
     let meta = fs::metadata(path).ok()?;
     let mtime_ms = meta
         .modified()
@@ -1681,7 +1687,7 @@ fn scan_legacy_header(path: &Path) -> Option<ScannedHeader> {
     })
 }
 
-fn session_entries(dir: &Path) -> Result<Vec<PathBuf>, StorageError> {
+pub(crate) fn session_entries(dir: &Path) -> Result<Vec<PathBuf>, StorageError> {
     Ok(fs::read_dir(dir)?
         .map(|e| e.map(|e| e.path()))
         .collect::<Result<Vec<_>, _>>()?
@@ -1785,6 +1791,7 @@ where
             content_revision: 0,
             epoch: next_epoch(),
             rewrites: 0,
+            mutating_since_flush: false,
         }
     }
 
@@ -1976,6 +1983,35 @@ where
         }
         self.meta = meta;
         self.touch_soft();
+    }
+
+    /// A file-mutating tool is about to run, so the next checkpoint must not
+    /// wait behind the soft-save delay: a crash between the tool's side
+    /// effects and the flush would leave disk without the transcript that
+    /// asked for them.
+    pub fn mark_mutating_tool(&mut self) {
+        self.mutating_since_flush = true;
+        self.touch();
+    }
+
+    pub fn mutating_since_flush(&self) -> bool {
+        self.mutating_since_flush
+    }
+
+    pub fn clear_mutating_flag(&mut self) {
+        self.mutating_since_flush = false;
+    }
+
+    /// Saves and clears the mutating flag, so the flush lands before the
+    /// model request or tool side effect that follows it.
+    pub fn durability_checkpoint(
+        &mut self,
+        claim: &SessionClaim,
+        dir: &StateDir,
+    ) -> Result<(), SessionError> {
+        self.save(claim, dir)?;
+        self.mutating_since_flush = false;
+        Ok(())
     }
 
     pub fn subagents(&self) -> &[StoredSubagent] {
@@ -4431,5 +4467,28 @@ mod tests {
 
         let loaded = TestSession::load_from(session.id, dir).unwrap();
         assert_same_session(&loaded, &session);
+    }
+
+    #[test]
+    fn durability_checkpoint_persists_and_clears_the_mutating_flag() {
+        const MUTATING_MESSAGE: &str = "run the write tool";
+
+        let tmp = tempfile::tempdir().unwrap();
+        let state = StateDir::from_path(tmp.path().to_path_buf());
+        let mut session: TestSession = Session::new("m", "/p");
+        let claim = SessionClaim::acquire(session.id, &state).expect(UNCLAIMED);
+        session.push_message(user_message(MUTATING_MESSAGE));
+        session.mark_mutating_tool();
+        assert!(session.mutating_since_flush());
+
+        session.durability_checkpoint(&claim, &state).unwrap();
+
+        assert!(!session.mutating_since_flush());
+        let loaded = TestSession::load(session.id, &state).unwrap();
+        assert_eq!(
+            loaded.messages(),
+            [user_message(MUTATING_MESSAGE)],
+            "the checkpoint must flush the message that precedes the tool side effect"
+        );
     }
 }

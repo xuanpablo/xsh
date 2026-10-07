@@ -242,7 +242,11 @@ mod tests {
         let policy = ModelPolicy::new(&[], &[]).expect("policy");
         let candidate = "zai/glm-4-7-air";
         let filtered = filter_candidates(&[candidate.to_string()], &policy, &current_model());
-        assert_eq!(filtered.len(), 1, "a distinct same-provider model is eligible");
+        assert_eq!(
+            filtered.len(),
+            1,
+            "a distinct same-provider model is eligible"
+        );
         let input = input_big();
         let picked = heuristic(&input, &filtered);
         assert_eq!(picked.spec.as_deref(), Some(candidate));

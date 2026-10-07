@@ -91,6 +91,10 @@ case("write_preserves_content_exactly", function()
   rmtree(tmpdir)
 end)
 
+case("sha256_known_vector", function()
+  eq(maki.hash.sha256("hello"), "2cf24dba5fb0a30e26e83b2ac5b9e29e", "digest mismatch")
+end)
+
 if #failures > 0 then
   error(#failures .. " case(s) failed:\n\n" .. table.concat(failures, "\n\n"))
 end

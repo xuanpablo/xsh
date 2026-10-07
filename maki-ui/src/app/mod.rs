@@ -17,7 +17,7 @@ pub(crate) mod tasks;
 pub(crate) mod tests;
 pub(crate) mod view;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::mem;
 use std::path::PathBuf;
@@ -42,7 +42,7 @@ use crate::components::lua_float::FloatManager;
 use crate::components::mcp_picker::{McpPicker, McpPickerAction};
 use crate::components::model_picker::{ModelPicker, ModelPickerAction};
 use crate::components::pack_review::{PackReview, PackReviewAction};
-use crate::components::permission_prompt::PermissionPrompt;
+use crate::components::permission_prompt::{PermissionPrompt, mutates_fs};
 use crate::components::plan_form::{PlanForm, PlanFormAction, builtin_menu, builtin_rows};
 use crate::components::rewind_picker::{RewindPicker, RewindPickerAction};
 use crate::components::scrollbar;
@@ -418,6 +418,9 @@ pub struct App {
     pub(crate) restore_event_tx: Option<maki_agent::EventSender>,
     pub(super) restoring: Arc<AtomicBool>,
     subagent_answers: HashMap<String, flume::Sender<String>>,
+    /// Model requests whose turn already reached this session's counters, so
+    /// a replayed or restored `TurnComplete` charges once.
+    counted_requests: HashSet<u64>,
 }
 
 impl App {
@@ -524,6 +527,7 @@ impl App {
             restore_event_tx: None,
             restoring: Arc::new(AtomicBool::new(false)),
             subagent_answers: HashMap::new(),
+            counted_requests: HashSet::new(),
         };
         app.model_picker.set_recents(
             maki_storage::model::read_recents(&app.storage)
@@ -967,6 +971,13 @@ impl App {
         // it and it owns the bottom panel. The pack review waits on nothing.
         if self.permission_prompt.is_open() {
             if let Some(answered) = self.permission_prompt.handle_key(key) {
+                // The tool is parked on this answer, so an allowed call that
+                // mutates the filesystem flushes the transcript before its
+                // side effects can outrun the log.
+                if answered.answer.is_allow() && mutates_fs(&answered.tool) {
+                    self.state.session_mut().mark_mutating_tool();
+                    self.checkpoint_now();
+                }
                 let encoded = TaggedAnswer::new(&answered.id, answered.answer).encode();
                 self.send_to_agent(answered.subagent_id.as_deref(), encoded);
             }
@@ -1626,6 +1637,9 @@ impl App {
         self.retry_info = None;
 
         if let AgentEvent::TurnComplete(ref tc) = envelope.event {
+            if !self.counted_requests.insert(tc.request_id) {
+                return vec![];
+            }
             self.state.token_usage += tc.usage;
             add_cost(&mut self.state.cost, tc.cost);
             add_cost(&mut self.chats[chat_idx].cost, tc.cost);
@@ -1657,6 +1671,13 @@ impl App {
         } = envelope.event
         {
             self.set_context_size(chat_idx, context_size_after);
+        }
+
+        // A title is host metadata, not a turn: nothing `handle_event` does
+        // below applies to it.
+        if let AgentEvent::Title { text } = envelope.event {
+            self.state.session_mut().set_title(text);
+            return vec![];
         }
 
         let plan_path = if self.state.mode == Mode::Plan {

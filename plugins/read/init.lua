@@ -119,8 +119,11 @@ local function read_file(path, offset, limit, ctx)
         "\n\n...\n\nTruncated lines: %d-%d. Use offset=%d to read further.",
         trunc_start,
         total_lines,
-        trunc_start
+        start
       )
+  elseif start == 1 then
+    llm_output = llm_output
+      .. string.format("\n\ncontent_hash: %s", maki.hash.sha256(content))
   end
 
   local shown = #lines

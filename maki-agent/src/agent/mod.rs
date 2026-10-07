@@ -4,10 +4,12 @@ mod history;
 pub mod hook;
 mod instructions;
 mod run;
+mod spill;
 mod streaming;
+pub mod titles;
 pub mod tool_dispatch;
 
-pub use compaction::compact;
+pub use compaction::{AutoCompactor, CompactJob, Compactor, compact};
 pub use frame::{RunContext, RunContextBuilder, plan_mode_update};
 pub use history::{
     History, HistorySnapshot, SharedMessages, UNAVAILABLE_RESULT, close_dangling_tool_calls,

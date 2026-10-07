@@ -1,7 +1,8 @@
 use std::any::Any;
+use std::collections::HashSet;
 use std::fmt::Write;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
@@ -16,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use strum::Display;
 
 pub const NO_FILES_FOUND: &str = "No files found";
+const REPORT_ANNOTATION: &str = "report";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GrepFileEntry {
@@ -242,6 +244,9 @@ pub enum ToolOutput {
     Instructions {
         blocks: Vec<InstructionBlock>,
     },
+    /// A subagent's `task_report` filing: markdown body rendered as its own
+    /// block with a report heading, distinct from plain tool output.
+    Report(TextOutput),
     Image {
         source: maki_providers::ImageSource,
         /// Caption for the tool_result block, e.g. "[image: slack.jpeg 222KB]";
@@ -287,6 +292,9 @@ impl ToolOutput {
                 let n = text.text.lines().count();
                 Some(format!("{n} lines"))
             }
+            Self::Report(text) if !text.text.is_empty() => {
+                Some(REPORT_ANNOTATION.to_owned())
+            }
             Self::Image { text, .. } => Some(
                 text.strip_prefix("[image: ")
                     .and_then(|t| t.strip_suffix(']'))
@@ -308,7 +316,9 @@ impl ToolOutput {
 
     pub fn instructions(&self) -> Option<&[InstructionBlock]> {
         match self {
-            Self::Plain(t) | Self::Markdown(t) | Self::ReadDir(t) => t.instructions.as_deref(),
+            Self::Plain(t) | Self::Markdown(t) | Self::ReadDir(t) | Self::Report(t) => {
+                t.instructions.as_deref()
+            }
             Self::ReadCode { instructions, .. } => instructions.as_deref(),
             _ => None,
         }
@@ -316,7 +326,7 @@ impl ToolOutput {
 
     pub fn loaded_tools(&self) -> &[String] {
         match self {
-            Self::Plain(t) | Self::Markdown(t) => &t.loaded_tools,
+            Self::Plain(t) | Self::Markdown(t) | Self::Report(t) => &t.loaded_tools,
             _ => &[],
         }
     }
@@ -333,7 +343,9 @@ impl ToolOutput {
 
     pub fn state(&self) -> Option<&serde_json::Value> {
         match self {
-            Self::Plain(t) | Self::Markdown(t) | Self::ReadDir(t) => t.state.as_ref(),
+            Self::Plain(t) | Self::Markdown(t) | Self::ReadDir(t) | Self::Report(t) => {
+                t.state.as_ref()
+            }
             _ => None,
         }
     }
@@ -353,7 +365,9 @@ impl ToolOutput {
     pub fn is_empty_result(&self) -> bool {
         match self {
             Self::GrepResult { entries } => entries.is_empty(),
-            Self::Plain(t) | Self::Markdown(t) | Self::ReadDir(t) => t.text.is_empty(),
+            Self::Plain(t) | Self::Markdown(t) | Self::ReadDir(t) | Self::Report(t) => {
+                t.text.is_empty()
+            }
             _ => false,
         }
     }
@@ -370,7 +384,9 @@ impl ToolOutput {
     /// [`HookStage::Output`]: crate::tools::HookStage::Output
     pub fn filterable_text_mut(&mut self) -> Option<&mut String> {
         match self {
-            Self::Plain(t) | Self::Markdown(t) | Self::ReadDir(t) if t.state.is_none() => {
+            Self::Plain(t) | Self::Markdown(t) | Self::ReadDir(t) | Self::Report(t)
+                if t.state.is_none() =>
+            {
                 Some(&mut t.text)
             }
             _ => None,
@@ -400,7 +416,9 @@ impl ToolOutput {
 
     pub fn as_display_text(&self) -> String {
         match self {
-            Self::Plain(t) | Self::Markdown(t) | Self::ReadDir(t) => t.text.clone(),
+            Self::Plain(t) | Self::Markdown(t) | Self::ReadDir(t) | Self::Report(t) => {
+                t.text.clone()
+            }
             Self::ReadCode {
                 start_line,
                 lines,
@@ -663,6 +681,11 @@ pub enum AgentEvent {
         images: Vec<ImageSource>,
     },
     QueueDrained,
+    /// A short title a cheap model gave the session after its first prompt.
+    /// Not part of the transcript; frontends store it as session metadata.
+    Title {
+        text: String,
+    },
     Done {
         usage: TokenUsage,
         /// Billed cost for the whole run, `None` while nothing was priced.
@@ -1038,6 +1061,18 @@ pub struct TurnCompleteEvent {
     /// The model's context window, so consumers can gauge `context_size`
     /// against the ceiling without resolving the model.
     pub context_window: u32,
+    /// Identifies the model request that produced this turn, so a host that
+    /// sees the same event twice (a replayed stream, a restored session)
+    /// banks its cost once.
+    pub request_id: u64,
+}
+
+/// Fresh id for every model request, so a response replayed to any ledger
+/// or host still maps back to the one request that paid for it.
+static REQUEST_IDS: AtomicU64 = AtomicU64::new(0);
+
+pub fn next_request_id() -> u64 {
+    REQUEST_IDS.fetch_add(1, Ordering::Relaxed) + 1
 }
 
 /// What one run spent, itself and everything it spawned.
@@ -1060,6 +1095,10 @@ pub struct RunTotals {
 #[derive(Debug, Default)]
 pub struct RunLedger {
     totals: Mutex<RunTotals>,
+    /// Request ids already banked, so a retried or replayed response charges
+    /// exactly once. Deduped at the ledger that first saw the id; the walk to
+    /// the parent then goes through [`Self::add`].
+    recorded: Mutex<HashSet<u64>>,
     parent: Option<Arc<RunLedger>>,
 }
 
@@ -1067,6 +1106,7 @@ impl RunLedger {
     pub fn child(parent: &Arc<Self>) -> Arc<Self> {
         Arc::new(Self {
             totals: Mutex::default(),
+            recorded: Mutex::default(),
             parent: Some(Arc::clone(parent)),
         })
     }
@@ -1081,6 +1121,32 @@ impl RunLedger {
         if let Some(parent) = &self.parent {
             parent.add(usage, cost, list_cost);
         }
+    }
+
+    /// Banks one model response, keyed by the request that produced it.
+    /// Returns false when the id was already counted, so replays (a restored
+    /// event stream, a retry that surfaced the same response twice) cost
+    /// nothing instead of double-billing. Deduped at the root of the ledger
+    /// chain, so the same event replayed to a sibling subagent is refused
+    /// too.
+    pub fn record(
+        &self,
+        request_id: u64,
+        usage: TokenUsage,
+        cost: Option<f64>,
+        list_cost: Option<f64>,
+    ) -> bool {
+        let mut root = self;
+        while let Some(parent) = &root.parent {
+            root = parent;
+        }
+        let mut recorded = root.recorded.lock().unwrap_or_else(|e| e.into_inner());
+        if !recorded.insert(request_id) {
+            return false;
+        }
+        drop(recorded);
+        self.add(usage, cost, list_cost);
+        true
     }
 
     pub fn totals(&self) -> RunTotals {
@@ -1258,6 +1324,8 @@ mod tests {
     #[test_case(ToolOutput::WriteCode { path: "a.rs".into(), byte_count: 99, lines: vec![] }, Some("99 bytes") ; "write_code_bytes")]
     #[test_case(ToolOutput::GrepResult { entries: vec![GrepFileEntry { path: "a.rs".into(), groups: vec![GrepMatchGroup::single(1, "hit")] }] }, Some("1 matches in 1 file") ; "grep_file_count")]
     #[test_case(ToolOutput::Diff { path: "a.rs".into(), before: String::new(), after: String::new(), summary: "ok".into() }, None ; "diff_no_annotation")]
+    #[test_case(ToolOutput::Report("done".into()),                   Some("report")      ; "report_annotates")]
+    #[test_case(ToolOutput::Report(String::new().into()),            None                ; "report_empty_no_annotation")]
     fn annotation_cases(output: ToolOutput, expected: Option<&str>) {
         assert_eq!(output.annotation().as_deref(), expected);
     }
@@ -1890,6 +1958,35 @@ mod tests {
             Some(FIRST_COST + SECOND_COST),
             "{ROLLUP_MSG}"
         );
+    }
+
+    #[test]
+    fn a_replayed_request_id_charges_once() {
+        const RETRIED_REQUEST: u64 = 7;
+
+        let ledger = RunLedger::default();
+        assert!(ledger.record(RETRIED_REQUEST, usage(FIRST_INPUT), None, None));
+        assert!(!ledger.record(RETRIED_REQUEST, usage(FIRST_INPUT), None, None));
+
+        let totals = ledger.totals();
+        assert_eq!(totals.usage.input, FIRST_INPUT);
+    }
+
+    #[test]
+    fn a_replay_delivered_to_a_sibling_subagent_is_refused() {
+        const RESTORED_REQUEST: u64 = 9;
+
+        let parent = Arc::new(RunLedger::default());
+        let first = RunLedger::child(&parent);
+        first.record(RESTORED_REQUEST, usage(FIRST_INPUT), Some(FIRST_COST), None);
+        let sibling = RunLedger::child(&parent);
+        assert!(!sibling.record(RESTORED_REQUEST, usage(FIRST_INPUT), Some(FIRST_COST), None));
+
+        assert_eq!(first.totals().usage.input, FIRST_INPUT);
+        assert_eq!(sibling.totals().usage.input, 0, "{OWN_SUBTREE_MSG}");
+        let rolled_up = parent.totals();
+        assert_eq!(rolled_up.usage.input, FIRST_INPUT);
+        assert_eq!(rolled_up.cost, Some(FIRST_COST));
     }
 
     const STREAM_RUN_IDS: [u64; 3] = [1, 2, 3];

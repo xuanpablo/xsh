@@ -197,6 +197,11 @@ pub fn spawn(params: HeadlessParams) -> (HeadlessHandle, SessionEvents) {
         let Some(provider) = connect(&mut model, params.timeouts, &event_tx).await else {
             return;
         };
+        let session_created = params
+            .resumed
+            .session
+            .as_ref()
+            .map_or_else(maki_storage::now_epoch, |s| s.created_at);
         let mut track = SessionTrack::open(
             params.resumed,
             params.claim,
@@ -235,7 +240,8 @@ pub fn spawn(params: HeadlessParams) -> (HeadlessHandle, SessionEvents) {
             turn.run_params(event_tx, context),
         )
         .with_loaded_instructions(instructions.loaded)
-        .with_mcp(mcp);
+        .with_mcp(mcp)
+        .with_session_created(session_created);
 
         let result = agent
             .run(AgentInput::from_defaults(

@@ -26,6 +26,7 @@ pub use project::{GatedFile, ProjectConfig, policy_grant};
 pub mod providers;
 
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 50 * 1024;
+pub const DEFAULT_SPILL_BYTES: usize = 64 * 1024;
 pub const DEFAULT_MAX_OUTPUT_LINES: usize = 2000;
 pub const DEFAULT_FLASH_DURATION_MS: u64 = 1500;
 pub const DEFAULT_TYPEWRITER_MS_PER_CHAR: u64 = 4;
@@ -95,30 +96,39 @@ pub const DEFAULT_BUILTINS: &[&str] = &[
     "bash",
     "batch",
     "code_execution",
+    "context_guard",
     "deepseek",
+    "doctor",
     "edit",
+    "fleet",
+    "git",
     "glob",
     "grep",
     "index",
     "list",
     "memory",
     "mistral",
+    "notebook",
     "openrouter",
+    "patch",
     "question",
     "read",
     "regolo",
     "requesty",
     "sessions",
     "skill",
+    "spill",
     "synthetic",
     "task",
     "tensorx",
     "thinking",
     "todo_write",
+    "verify",
     "view_image",
     "webfetch",
     "websearch",
     "write",
+    "workflow",
 ];
 
 /// The [`DEFAULT_BUILTINS`] that declare a provider and register no tool, so
@@ -800,6 +810,7 @@ impl<'de> Deserialize<'de> for CompactionBuffer {
 #[serde(default, deny_unknown_fields)]
 pub struct AgentFileConfig {
     pub max_output_bytes: Option<usize>,
+    pub spill_bytes: Option<usize>,
     pub max_output_lines: Option<usize>,
     pub max_continuation_turns: Option<u32>,
     pub max_turn_output: Option<u32>,
@@ -807,7 +818,10 @@ pub struct AgentFileConfig {
     pub compaction_instructions: Option<String>,
     pub post_compaction_instructions: Option<String>,
     pub stale_read_check: Option<bool>,
+    pub session_titles: Option<bool>,
+    pub time_context: Option<bool>,
     pub rtk: Option<bool>,
+    pub sandbox: Option<String>,
     #[serde(default)]
     pub router: Option<RouterFileConfig>,
 }
@@ -818,6 +832,7 @@ impl AgentFileConfig {
             self,
             overlay,
             max_output_bytes,
+            spill_bytes,
             max_output_lines,
             max_continuation_turns,
             max_turn_output,
@@ -825,7 +840,10 @@ impl AgentFileConfig {
             compaction_instructions,
             post_compaction_instructions,
             stale_read_check,
+            session_titles,
+            time_context,
             rtk,
+            sandbox,
             router
         );
     }
@@ -1419,22 +1437,36 @@ impl Default for ToolOutputLines {
 #[derive(Debug, Clone, ConfigSection, Serialize)]
 #[config(section = "agent.router", fields_only)]
 pub struct RouterConfig {
-    #[config(default = false, desc = "Route each run to a model via Jev decision calls")]
+    #[config(
+        default = false,
+        desc = "Route each run to a model via Jev decision calls"
+    )]
     pub enabled: bool,
 
     #[config(ty = "String", desc = "Jev /v1/decide endpoint")]
     pub endpoint: String,
 
-    #[config(ty = "String", desc = "Env var holding the Jev API key; router is off when unset")]
+    #[config(
+        ty = "String",
+        desc = "Env var holding the Jev API key; router is off when unset"
+    )]
     pub api_key_env: String,
 
     #[config(default = DEFAULT_ROUTER_TIMEOUT_MS, min = 100, desc = "Router decision timeout (milliseconds)")]
     pub timeout_ms: u64,
 
-    #[config(ty = "f32", default_doc = "0.7", desc = "Minimum confidence for the router to adopt its pick")]
+    #[config(
+        ty = "f32",
+        default_doc = "0.7",
+        desc = "Minimum confidence for the router to adopt its pick"
+    )]
     pub confidence_threshold: f32,
 
-    #[config(ty = "string[]", default_doc = "[]", desc = "Qualified model specs the router may pick from")]
+    #[config(
+        ty = "string[]",
+        default_doc = "[]",
+        desc = "Qualified model specs the router may pick from"
+    )]
     pub candidates: Vec<String>,
 }
 
@@ -1488,6 +1520,9 @@ pub struct AgentConfig {
     #[config(default = DEFAULT_MAX_OUTPUT_BYTES, min = MIN_OUTPUT_BYTES, desc = "Max tool output size (bytes)")]
     pub max_output_bytes: usize,
 
+    #[config(default = DEFAULT_SPILL_BYTES, min = 0, desc = "Tool outputs above this many bytes are written whole to .maki/spill/<id> and replaced in the transcript by their head plus a locator (0 disables)")]
+    pub spill_bytes: usize,
+
     #[config(default = DEFAULT_MAX_OUTPUT_LINES, min = MIN_OUTPUT_LINES, desc = "Max tool output lines")]
     pub max_output_lines: usize,
 
@@ -1522,9 +1557,28 @@ pub struct AgentConfig {
 
     #[config(
         default = true,
+        desc = "Generate a short session title with a cheap model call after the first user turn"
+    )]
+    pub session_titles: bool,
+
+    #[config(
+        default = false,
+        desc = "Tell the model the current time and session elapsed in a context update before each user step"
+    )]
+    pub time_context: bool,
+
+    #[config(
+        default = true,
         desc = "Rewrite bash commands with [rtk](https://github.com/rtk-ai/rtk) when it is installed"
     )]
     pub rtk: bool,
+
+    #[config(
+        ty = "String",
+        default = "None",
+        desc = "Default sandbox mode for bash commands (\"workspace_write\" allows reads everywhere but writes only in the working dir; fails closed when no backend is available)"
+    )]
+    pub sandbox: Option<String>,
 
     #[config(skip, default = "None")]
     pub max_turns: Option<u32>,
@@ -1545,6 +1599,7 @@ impl AgentConfig {
     fn from_file(file: AgentFileConfig) -> Result<Self, ConfigError> {
         Ok(Self {
             max_output_bytes: file.max_output_bytes.unwrap_or(DEFAULT_MAX_OUTPUT_BYTES),
+            spill_bytes: file.spill_bytes.unwrap_or(DEFAULT_SPILL_BYTES),
             max_output_lines: file.max_output_lines.unwrap_or(DEFAULT_MAX_OUTPUT_LINES),
             max_continuation_turns: file
                 .max_continuation_turns
@@ -1554,7 +1609,10 @@ impl AgentConfig {
             compaction_instructions: file.compaction_instructions,
             post_compaction_instructions: file.post_compaction_instructions,
             stale_read_check: file.stale_read_check.unwrap_or(true),
+            session_titles: file.session_titles.unwrap_or(true),
+            time_context: file.time_context.unwrap_or(false),
             rtk: file.rtk.unwrap_or(true),
+            sandbox: file.sandbox,
             router: match file.router {
                 Some(r) => r.into_config()?,
                 None => RouterConfig::default(),
@@ -2026,6 +2084,11 @@ pub struct TelemetryConfig {
              desc = "Include tool input in `maki.tool_result` events. Off by default")]
     pub log_tool_details: Option<bool>,
 
+    #[config(default = None, ty = "bool", default_doc = "false",
+             env = "OTEL_SESSION_EVENTS",
+             desc = "Emit the session event stream (`maki.tool_call_start`, `maki.permission_grant`, `maki.compaction`): names, counts and durations only, never paths or env values. Off by default")]
+    pub session_events: Option<bool>,
+
     #[config(default = None, ty = "integer", default_doc = "10240",
              env = "MAKI_OTEL_CONTENT_MAX_LENGTH",
              desc = "Character cap on any logged prompt or tool input")]
@@ -2066,6 +2129,7 @@ impl TelemetryConfig {
             metrics_include_version,
             log_user_prompts,
             log_tool_details,
+            session_events,
             content_max_length
         );
     }
@@ -4758,16 +4822,18 @@ mod tests {
         .unwrap();
         let config = raw.into_config(&[]).unwrap();
         assert!(config.agent.router.enabled);
-        assert_eq!(config.agent.router.endpoint, "https://jev.example/v1/decide");
+        assert_eq!(
+            config.agent.router.endpoint,
+            "https://jev.example/v1/decide"
+        );
         assert_eq!(config.agent.router.candidates.len(), 2);
         assert!((config.agent.router.confidence_threshold - 0.85).abs() < f32::EPSILON);
     }
 
     #[test]
     fn router_config_rejects_threshold_out_of_range() {
-        let raw: Result<RawConfig, _> = toml::from_str(
-            "[agent.router]\nconfidence_threshold = 1.5\n",
-        );
+        let raw: Result<RawConfig, _> =
+            toml::from_str("[agent.router]\nconfidence_threshold = 1.5\n");
         assert!(raw.is_err() || raw.unwrap().into_config(&[]).is_err());
     }
 }

@@ -38,6 +38,7 @@ pub(crate) const SPINNER_STYLE_NAME: &str = "spinner";
 pub(crate) const SPINNER_STYLE_PREFIX: &str = "spinner:";
 
 const CODE_OUTPUT_DIVIDER: &str = "  ────────────";
+const REPORT_HEADING: &str = "  ── report ──";
 /// Instruction blocks have no tool of their own, so they render under this name.
 const INSTRUCTIONS_TOOL: &str = "load";
 /// Stands in for a tool message whose role carries no name.
@@ -172,6 +173,7 @@ impl HighlightRequest {
             | ToolOutput::ReadDir(_)
             | ToolOutput::TodoList(_)
             | ToolOutput::Batch { .. }
+            | ToolOutput::Report(_)
             | ToolOutput::Image { .. } => None,
         });
         if input.is_none() && output.is_none() {
@@ -326,6 +328,7 @@ struct ToolLineBuilder {
     truncation: SectionFlags,
     limits: RenderLimits,
     markdown: bool,
+    report: bool,
     indicator: Indicator,
 }
 
@@ -346,13 +349,21 @@ impl ToolLineBuilder {
             truncation: SectionFlags::default(),
             limits,
             markdown: false,
+            report: false,
             indicator,
         }
     }
 
     fn apply_output_format(&mut self, output: Option<&ToolOutput>) {
-        if output.is_some_and(ToolOutput::is_markdown) {
-            self.markdown = true;
+        if let Some(output) = output {
+            match output {
+                ToolOutput::Markdown(_) => self.markdown = true,
+                ToolOutput::Report(_) => {
+                    self.markdown = true;
+                    self.report = true;
+                }
+                _ => {}
+            }
         }
     }
 
@@ -440,6 +451,12 @@ impl ToolLineBuilder {
         }
 
         if let Some(text) = &resolved.text {
+            if self.report {
+                self.lines.push(Line::from(Span::styled(
+                    REPORT_HEADING,
+                    theme::current().tool_dim,
+                )));
+            }
             if self.markdown {
                 self.push_markdown_body(text);
             } else {
@@ -759,9 +776,8 @@ fn push_section(out: &mut String, text: &str) {
 /// The untruncated output text, for the variants that carry one.
 fn plain_output_text(output: &ToolOutput) -> Option<&str> {
     match output {
-        ToolOutput::Plain(t) | ToolOutput::Markdown(t) | ToolOutput::ReadDir(t) => {
-            Some(t.text.as_str())
-        }
+        ToolOutput::Plain(t) | ToolOutput::Markdown(t) | ToolOutput::ReadDir(t)
+        | ToolOutput::Report(t) => Some(t.text.as_str()),
         ToolOutput::Batch { text } => Some(text.as_str()),
         _ => None,
     }
@@ -1009,6 +1025,26 @@ mod tests {
         let text = lines_text(&tl);
         assert!(text.contains("bold"));
         assert!(text.contains("code"));
+    }
+
+    #[test]
+    fn report_output_renders_distinct_heading() {
+        let mut msg = task_msg("**findings** here".into());
+        if let Some(output) = &mut msg.tool_output {
+            *output = Arc::new(match output.as_ref() {
+                ToolOutput::Markdown(t) => ToolOutput::Report(t.clone()),
+                _ => unreachable!("task_msg starts as markdown"),
+            });
+        }
+        let tl = build_tool_lines(
+            &msg,
+            ToolStatus::Success,
+            &test_rctx(80),
+            SectionFlags::default(),
+        );
+        let text = lines_text(&tl);
+        assert!(text.contains(REPORT_HEADING.trim()));
+        assert!(text.contains("findings"));
     }
 
     fn task_msg(output: String) -> DisplayMessage {

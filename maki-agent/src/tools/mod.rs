@@ -486,33 +486,58 @@ pub(crate) fn truncate_bytes(line: &str, max_bytes: usize) -> String {
     }
 }
 
+/// Head + tail retention with an explicit omitted-lines marker, so a
+/// truncated output always says what was dropped. `max_lines` splits evenly
+/// between the two ends; `max_bytes` caps what both together can cost.
 pub fn truncate_output(text: String, max_lines: usize, max_bytes: usize) -> String {
-    const TRUNCATED_MARKER: &str = "[truncated]";
-    let mut lines = text.lines();
-    let mut result = String::new();
-    let mut truncated = false;
-
-    for _ in 0..max_lines {
-        let Some(line) = lines.next() else { break };
-        if !result.is_empty() {
-            result.push('\n');
-        }
-        result.push_str(line);
-        if result.len() > max_bytes {
-            let boundary = result.floor_char_boundary(max_bytes);
-            result.truncate(boundary);
-            truncated = true;
-            break;
-        }
+    const OMITTED_LINES_MARKER: &str = "[omitted ";
+    const OMITTED_LINES_SUFFIX: &str = " lines]";
+    const TRUNCATED_BYTES_PREFIX: &str = "[truncated ";
+    const TRUNCATED_BYTES_SUFFIX: &str = " bytes]";
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() <= max_lines && text.len() <= max_bytes {
+        return text;
     }
-
-    if !truncated && lines.next().is_some() {
-        truncated = true;
+    let head_budget = (max_lines / 2).max(1);
+    let mut head_end = 0;
+    let mut head_bytes = 0;
+    while head_end < lines.len()
+        && head_end < head_budget
+        && head_bytes + lines[head_end].len() < max_bytes
+    {
+        head_bytes += lines[head_end].len() + 1;
+        head_end += 1;
     }
-
-    if truncated {
+    if head_end == 0 {
+        // The first line alone breaks the byte budget, so nothing else can be
+        // kept either: hand back a whole-character prefix of it.
+        let boundary = text.floor_char_boundary(max_bytes);
+        return format!(
+            "{}\n\n{TRUNCATED_BYTES_PREFIX}{}{TRUNCATED_BYTES_SUFFIX}",
+            &text[..boundary],
+            text.len() - boundary
+        );
+    }
+    let mut tail_start = lines.len();
+    let mut tail_bytes = 0;
+    while tail_start > head_end
+        && lines.len() - tail_start < max_lines - head_end
+        && tail_bytes + lines[tail_start - 1].len() < max_bytes - head_bytes
+    {
+        tail_bytes += lines[tail_start - 1].len() + 1;
+        tail_start -= 1;
+    }
+    let omitted = lines.len() - head_end - (lines.len() - tail_start);
+    let mut result = lines[..head_end].join("\n");
+    if omitted > 0 {
         result.push('\n');
-        result.push_str(TRUNCATED_MARKER);
+        result.push_str(OMITTED_LINES_MARKER);
+        result.push_str(&omitted.to_string());
+        result.push_str(OMITTED_LINES_SUFFIX);
+    }
+    if tail_start < lines.len() {
+        result.push('\n');
+        result.push_str(&lines[tail_start..].join("\n"));
     }
     result
 }
@@ -889,11 +914,26 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let result = truncate_output(many_lines, MAX_LINES, MAX_BYTES);
-        assert!(result.ends_with("[truncated]"));
+        assert!(result.starts_with("line 0\nline 1\n"));
+        assert!(result.ends_with("line 2499"));
+        assert!(result.contains("[omitted 500 lines]"));
 
         let many_bytes = "x".repeat(MAX_BYTES + 1000);
         let result = truncate_output(many_bytes, MAX_LINES, MAX_BYTES);
-        assert!(result.ends_with("[truncated]"));
+        assert!(result.starts_with(&"x".repeat(MAX_BYTES)));
+        assert!(result.ends_with("[truncated 1000 bytes]"));
+    }
+
+    #[test]
+    fn truncate_output_keeps_head_and_tail_on_line_overflow() {
+        const MAX_LINES: usize = 4;
+        const MAX_BYTES: usize = 10_000;
+        let text = (1..=10)
+            .map(|i| format!("l{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = truncate_output(text, MAX_LINES, MAX_BYTES);
+        assert_eq!(result, "l1\nl2\n[omitted 6 lines]\nl9\nl10");
     }
 
     #[test]

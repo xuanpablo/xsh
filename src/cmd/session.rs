@@ -34,6 +34,7 @@ const NO_SESSIONS: &str = "No sessions found";
 const NO_SESSIONS_HERE: &str = "No sessions found in this directory (try --global)";
 const NEEDS_TTY: &str = "refusing to delete without a terminal to confirm on, pass --force";
 const CANCELLED: &str = "Cancelled";
+const NO_MATCHES: &str = "No matches";
 
 pub fn list(global: bool, json: bool, storage: &StateDir) -> Result<()> {
     let summaries = if global {
@@ -62,6 +63,58 @@ pub fn list(global: bool, json: bool, storage: &StateDir) -> Result<()> {
     }
     let table = render_table(&summaries, now_epoch(), terminal_budget());
     print!("{table}");
+    Ok(())
+}
+
+pub fn search(
+    query: &str,
+    global: bool,
+    json: bool,
+    limit: usize,
+    storage: &StateDir,
+) -> Result<()> {
+    let hits = maki_storage::search::search_sessions(storage, query, limit)
+        .context("search session transcripts")?;
+    let hits = if global {
+        hits
+    } else {
+        let cwd = env::current_dir().context("read current directory")?;
+        let cwd = cwd.to_string_lossy();
+        let local: std::collections::HashSet<String> = AppSession::list(&cwd, storage)
+            .context("list sessions")?
+            .into_iter()
+            .map(|s| s.id.to_string())
+            .collect();
+        hits.into_iter()
+            .filter(|hit| local.contains(&hit.session_id))
+            .collect()
+    };
+
+    if json {
+        let rows: Vec<serde_json::Value> = hits
+            .iter()
+            .map(|hit| {
+                serde_json::json!({
+                    "session_id": hit.session_id,
+                    "role": hit.role,
+                    "snippet": hit.snippet,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string(&rows).context("serialize search hits")?
+        );
+        return Ok(());
+    }
+
+    if hits.is_empty() {
+        println!("{NO_MATCHES}");
+        return Ok(());
+    }
+    for hit in &hits {
+        println!("{}  {}  {}", hit.session_id, hit.role, hit.snippet);
+    }
     Ok(())
 }
 

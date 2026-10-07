@@ -179,10 +179,7 @@ fn test_questions() -> BTreeMap<String, Question> {
             "model".to_string(),
             Question::Choice {
                 instructions: "pick a model".to_string(),
-                criteria: BTreeMap::from([(
-                    "zai/glm-5.3-flash".to_string(),
-                    "fast".to_string(),
-                )]),
+                criteria: BTreeMap::from([("zai/glm-5.3-flash".to_string(), "fast".to_string())]),
             },
         ),
         (
@@ -203,7 +200,10 @@ fn mock_server(status: &'static str, body: &'static str) -> String {
         if let Ok((mut stream, _)) = listener.accept() {
             let mut buf = [0u8; 4096];
             let _ = stream.read(&mut buf);
-            let response = format!("HTTP/1.1 {status}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
+            let response = format!(
+                "HTTP/1.1 {status}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
             let _ = stream.write_all(response.as_bytes());
         }
     });
@@ -218,11 +218,9 @@ fn decide_parses_choice_and_noul_answers() {
     }}"#;
     let server = mock_server("200 OK", body);
     let client = test_client(server);
-    let answers = smol::block_on(client.decide(
-        &serde_json::json!({"task": "fix a typo"}),
-        test_questions(),
-    ))
-    .expect("decide ok");
+    let answers =
+        smol::block_on(client.decide(&serde_json::json!({"task": "fix a typo"}), test_questions()))
+            .expect("decide ok");
     assert_eq!(
         answers["model"].choice.as_deref(),
         Some("zai/glm-5.3-flash")

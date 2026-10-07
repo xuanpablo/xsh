@@ -12,6 +12,8 @@ pub mod log;
 pub mod model;
 pub mod paths;
 pub mod plans;
+pub mod search;
+pub mod secrets;
 pub mod sessions;
 pub mod theme;
 pub mod trusted_folders;

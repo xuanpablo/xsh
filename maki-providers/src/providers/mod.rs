@@ -461,9 +461,14 @@ impl KeyPool {
     }
 
     fn key_from_config(slug: &str) -> Option<String> {
-        maki_config::providers::ProvidersConfig::load()
-            .get(slug)
-            .and_then(|d| d.api_key.clone())
+        let key = maki_config::providers::ProvidersConfig::load()
+            .get(slug)?
+            .api_key.clone()?;
+        if !key.starts_with(maki_storage::auth::REF_PREFIX) {
+            return Some(key);
+        }
+        let dir = maki_storage::StateDir::resolve().ok()?;
+        maki_storage::auth::resolve_credential(&dir, &key)
     }
 
     /// For callers that already hold the keys, rather than a source to resolve

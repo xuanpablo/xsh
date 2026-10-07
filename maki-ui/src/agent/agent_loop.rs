@@ -66,6 +66,7 @@ pub(super) struct AgentLoop {
     lua_handle: EventHandle,
     subagent_cancels: Arc<CancelMap<String>>,
     model_policy: Arc<ModelPolicy>,
+    session_created: u64,
 }
 
 impl AgentLoop {
@@ -112,6 +113,10 @@ impl AgentLoop {
             lua_handle,
             subagent_cancels,
             model_policy,
+            session_created: resumed
+                .session
+                .as_ref()
+                .map_or_else(maki_storage::now_epoch, |s| s.created_at),
         }
     }
 
@@ -277,6 +282,14 @@ impl AgentLoop {
         event_tx: EventSender,
         cancel: &CancelToken,
     ) -> Result<DoneReason, AgentError> {
+        // Read before the run pushes its messages: a session still awaiting
+        // its first user prompt is the only one a generated title may name.
+        let untitled = self
+            .history
+            .as_slice()
+            .iter()
+            .all(|m| !matches!(m.role, maki_providers::Role::User));
+        let title_tx = self.config.session_titles.then(|| event_tx.clone());
         let (context, prompt_slots) = self.context_builder().await;
 
         if let Some(ref prompt_ref) = input.prompt {
@@ -345,11 +358,42 @@ impl AgentLoop {
         .with_interrupt_source(Arc::clone(&self.queue) as Arc<dyn maki_agent::InterruptSource>)
         .with_cancel(cancel.clone())
         .with_model_sync(Arc::clone(&self.model_slot))
-        .with_mcp(self.mcp.clone());
+        .with_mcp(self.mcp.clone())
+        .with_session_created(self.session_created);
 
         let result = agent.run(input).await;
         drop(agent);
+        if result.is_ok()
+            && let Some(title_tx) = title_tx
+            && let Some(prompt) = agent::titles::first_user_text(self.history.as_slice())
+            && untitled
+        {
+            self.spawn_title(prompt, title_tx);
+        }
         result
+    }
+
+    /// The title lands whenever the cheap model answers: the run is over, so
+    /// nothing waits on it. A failure keeps the heuristic title.
+    fn spawn_title(&self, prompt: String, event_tx: EventSender) {
+        let slot = self.model_slot.load();
+        let (provider, model) = agent::resolve_compaction_model(
+            &slot.provider,
+            &slot.model,
+            self.timeouts,
+            &self.model_policy,
+        );
+        let session_id = self.session_id.clone();
+        smol::spawn(async move {
+            match agent::titles::generate(provider.as_ref(), &model, &prompt, Some(&session_id))
+                .await
+            {
+                Ok(Some(title)) => event_tx.try_send(AgentEvent::Title { text: title }),
+                Ok(None) => {}
+                Err(e) => error!(error = %e, "session title generation failed"),
+            }
+        })
+        .detach();
     }
 
     async fn reload_instructions(&mut self) {

@@ -1049,6 +1049,7 @@ impl EventPump {
                 }
                 self.tool_inputs.insert(ts.id.clone(), (name, input));
             }
+            AgentEvent::Title { .. } => {} // display-only, no headless output
             AgentEvent::ToolPending { .. }
             | AgentEvent::ToolOutput { .. }
             | AgentEvent::ToolDone(_)

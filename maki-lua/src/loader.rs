@@ -107,6 +107,34 @@ static BUNDLED_PLUGINS: &[BundledPlugin] = &[
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/diagnostics"),
     },
     BundledPlugin {
+        name: "patch",
+        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/patch"),
+    },
+    BundledPlugin {
+        name: "verify",
+        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/verify"),
+    },
+    BundledPlugin {
+        name: "notebook",
+        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/notebook"),
+    },
+    BundledPlugin {
+        name: "fleet",
+        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/fleet"),
+    },
+    BundledPlugin {
+        name: "git",
+        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/git"),
+    },
+    BundledPlugin {
+        name: "doctor",
+        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/doctor"),
+    },
+    BundledPlugin {
+        name: "context_guard",
+        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/context_guard"),
+    },
+    BundledPlugin {
         name: "batch",
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/batch"),
     },
@@ -175,6 +203,14 @@ static BUNDLED_PLUGINS: &[BundledPlugin] = &[
     BundledPlugin {
         name: "list",
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/list"),
+    },
+    BundledPlugin {
+        name: "spill",
+        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/spill"),
+    },
+    BundledPlugin {
+        name: "workflow",
+        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/workflow"),
     },
     // The rest register no tool. They declare a provider maki ships, on
     // the same surface a third-party plugin declares one with, which is what

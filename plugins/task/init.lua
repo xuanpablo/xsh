@@ -5,6 +5,12 @@
 -- primitives only (`maki.agent.session`, `maki.json.schema_validator`,
 -- `maki.async.semaphore`).
 --
+-- Report tasks swap structured_output for task_report: the child files a
+-- report, the parent gets it as a distinct block plus a task id, and `resume`
+-- continues that parked child with a follow-up prompt. `fork_depth` seeds a
+-- fresh child with the tail of the parent transcript instead of a blank
+-- history.
+--
 -- It also owns the /tasks picker over the subagents spawned here: picker.lua
 -- registers the command and the keymap when this file is loaded, so the two
 -- cannot be enabled apart and left pointing at each other's absence.
@@ -17,6 +23,28 @@ local STRUCTURED_OUTPUT_NAME = "structured_output"
 local STRUCTURED_OUTPUT_DESCRIPTION = "Report your final result. Call it exactly once when your task is complete."
 local STRUCTURED_OUTPUT_ACK = "Output recorded."
 local STRUCTURED_OUTPUT_PROMPT_SUFFIX = "\n\nWhen finished, call the structured_output tool with your final result."
+local TASK_REPORT_NAME = "task_report"
+local TASK_REPORT_DESCRIPTION =
+  "Deliver your final report. Call it exactly once, after your work is done and before you finish."
+local TASK_REPORT_ACK = "Report recorded."
+local TASK_REPORT_PROMPT_SUFFIX = "\n\nWhen finished, call the task_report tool with your final report."
+local TASK_REPORT_SCHEMA = {
+  type = "object",
+  required = { "summary" },
+  additionalProperties = false,
+  properties = {
+    summary = { type = "string", description = "Concise summary of the outcome, with file:line refs where useful." },
+    details = { type = "string", description = "Optional supporting findings, caveats, or next steps." },
+  },
+}
+local NUDGE_REPORT = "You did not call the task_report tool. Call it now with your final report."
+local REPORT_MISSING_ERROR = "subagent finished without calling task_report"
+local RESUME_NOT_FOUND_ERROR = "no resumable task with that id (expired or not a report task)"
+local FORK_DEPTH_ERROR = "fork_depth must be a positive integer"
+local REPORT_HEADING = "## Task report"
+local TASK_ID_LABEL = 'Task id: %s. Resume it with task(resume = "%s").'
+local TASK_ID_PREFIX = "task-"
+local MAX_RESUMABLE = 4
 local MAX_NUDGES = 2
 local MAX_SCHEMA_ERRORS = 3
 local SCHEMA_COMPILE_ERROR = "invalid output_schema"
@@ -43,8 +71,9 @@ Subagent types (set via `subagent_type`):
 Notes:
 1. Launch multiple tasks concurrently when possible.
 2. The agent's result is not visible to the user. Summarize it in your response.
-3. Each invocation starts fresh - inline any needed context into the prompt.
+3. Each invocation starts fresh - inline any needed context into the prompt. Pass `fork_depth` to instead seed it with the tail of this session's transcript.
 4. Tell it to return concise summaries with file:line refs, not full file contents.
+5. `report = true` requires the subagent to file a `task_report` before finishing and returns a task id; `resume` continues that subagent with a follow-up.
 ]]
 
 local opts = maki.api.register_options({
@@ -82,6 +111,18 @@ local schema = {
     output_schema = {
       description = "JSON Schema (object) the subagent's final result must match. When set, the result is returned as a validated JSON string.",
     },
+    report = {
+      type = "boolean",
+      description = "Require the subagent to call its task_report tool before finishing. The report comes back as a distinct block plus a task id you can resume with `resume`.",
+    },
+    resume = {
+      type = "string",
+      description = "Task id returned by an earlier report task. Continues that subagent with this prompt instead of spawning a new one.",
+    },
+    fork_depth = {
+      type = "integer",
+      description = "Fork: seed the subagent with the last N messages of this session's transcript (text only) instead of starting blank. Omit to spawn fresh.",
+    },
   },
 }
 
@@ -113,7 +154,71 @@ local function bounded_errors(errors)
   return table.concat(out, "\n")
 end
 
+-- Finished report-mode children stay parked here so the parent can resume
+-- them; the cap closes the oldest when full, since a parked session holds a
+-- cancel slot and an event relay open. The slot is the same table the child's
+-- task_report handler writes into, so a resumed run files into it too.
+local resumed = {}
+local resumed_order = {}
+local next_task_seq = 0
+
+local function park(id, entry)
+  if resumed[id] then
+    return
+  end
+  resumed[id] = entry
+  resumed_order[#resumed_order + 1] = id
+  while #resumed_order > MAX_RESUMABLE do
+    local evicted = table.remove(resumed_order, 1)
+    local evicted_entry = resumed[evicted]
+    resumed[evicted] = nil
+    evicted_entry.sess:close()
+  end
+end
+
+local function report_output(id, report)
+  local parts = { string.format(TASK_ID_LABEL, id, id), report.summary }
+  if report.details and report.details ~= "" then
+    parts[#parts + 1] = report.details
+  end
+  return table.concat(parts, "\n\n")
+end
+
 local function handler(input, ctx)
+  if input.resume then
+    local entry = resumed[input.resume]
+    if not entry then
+      return { llm_output = RESUME_NOT_FOUND_ERROR, is_error = true }
+    end
+    local permit = semaphore:acquire()
+    local ok, out = pcall(function()
+      entry.slot.report = nil
+      local result, err = entry.sess:prompt(input.prompt .. TASK_REPORT_PROMPT_SUFFIX)
+      local retries = 0
+      while not err and not entry.slot.report and retries < MAX_NUDGES do
+        retries = retries + 1
+        result, err = entry.sess:prompt(NUDGE_REPORT)
+      end
+      if err then
+        return { llm_output = "sub-agent error: " .. err, is_error = true }
+      end
+      local report = entry.slot.report
+      if not report then
+        return { llm_output = REPORT_MISSING_ERROR, is_error = true }
+      end
+      return {
+        llm_output = report_output(input.resume, report),
+        format = "report",
+        state = { report = true },
+      }
+    end)
+    permit:release()
+    if not ok then
+      error(out, 0)
+    end
+    return out
+  end
+
   local subagent_type = input.subagent_type or "research"
   if subagent_type ~= "research" and subagent_type ~= "general" then
     return { llm_output = "unknown subagent type: " .. subagent_type, is_error = true }
@@ -131,6 +236,14 @@ local function handler(input, ctx)
       return { llm_output = SCHEMA_COMPILE_ERROR .. ": " .. compile_err, is_error = true }
     end
   end
+
+  local report_mode = input.report == true and validator == nil
+  local fork_depth = input.fork_depth
+  if fork_depth ~= nil and (type(fork_depth) ~= "number" or fork_depth < 1 or fork_depth % 1 ~= 0) then
+    return { llm_output = FORK_DEPTH_ERROR, is_error = true }
+  end
+  next_task_seq = next_task_seq + 1
+  local task_id = TASK_ID_PREFIX .. next_task_seq
 
   local model, model_err = maki.agent.resolve_model(ctx, {
     tier = input.model_tier,
@@ -159,6 +272,7 @@ local function handler(input, ctx)
   end
 
   local captured, last_errors
+  local report_slot = {}
   local local_tools
   if validator then
     local_tools = {
@@ -173,6 +287,17 @@ local function handler(input, ctx)
           end
           captured = value
           return STRUCTURED_OUTPUT_ACK
+        end,
+      },
+    }
+  elseif report_mode then
+    local_tools = {
+      [TASK_REPORT_NAME] = {
+        description = TASK_REPORT_DESCRIPTION,
+        input_schema = TASK_REPORT_SCHEMA,
+        handler = function(value)
+          report_slot.report = value
+          return TASK_REPORT_ACK
         end,
       },
     }
@@ -194,6 +319,7 @@ local function handler(input, ctx)
       audience = audience,
       name = input.description,
       thinking = input.thinking,
+      fork_last = fork_depth,
     })
     if sess_err then
       return { llm_output = sess_err, is_error = true }
@@ -202,6 +328,8 @@ local function handler(input, ctx)
     local message = input.prompt
     if validator then
       message = message .. STRUCTURED_OUTPUT_PROMPT_SUFFIX
+    elseif report_mode then
+      message = message .. TASK_REPORT_PROMPT_SUFFIX
     end
 
     local result, err = sess:prompt(message)
@@ -210,7 +338,10 @@ local function handler(input, ctx)
       if validator and not captured then
         retries = retries + 1
         result, err = sess:prompt(NUDGE_MISSING)
-      elseif not validator and result.text == "" then
+      elseif report_mode and not report_slot.report then
+        retries = retries + 1
+        result, err = sess:prompt(NUDGE_REPORT)
+      elseif not validator and not report_mode and result.text == "" then
         retries = retries + 1
         result, err = sess:prompt(NUDGE_SUMMARY)
       else
@@ -233,14 +364,28 @@ local function handler(input, ctx)
       local msg = last_errors and (STRUCTURED_INVALID_ERROR .. ":\n" .. last_errors) or STRUCTURED_MISSING_ERROR
       return { llm_output = msg, is_error = true }
     end
-    if not validator and result.text == "" then
+    if report_mode and not report_slot.report then
+      return { llm_output = REPORT_MISSING_ERROR, is_error = true }
+    end
+    if not validator and not report_mode and result.text == "" then
       return { llm_output = SUMMARY_MISSING_ERROR, is_error = true }
+    end
+    if report_mode then
+      return {
+        llm_output = report_output(task_id, report_slot.report),
+        format = "report",
+        state = { report = true },
+      }
     end
     return { llm_output = captured and maki.json.encode(captured) or result.text, format = "markdown" }
   end)
 
   if sess then
-    sess:close()
+    if report_mode and report_slot.report then
+      park(task_id, { sess = sess, slot = report_slot })
+    else
+      sess:close()
+    end
   end
   permit:release()
   if not ok then
@@ -256,6 +401,10 @@ end
 -- Standalone runs render markdown on the Rust side (format = "markdown");
 -- this mirrors that for restore and batch children, which build the body here.
 local function restore(_input, output, is_error, ctx)
+  local st = ctx:state()
+  if st and st.report then
+    output = REPORT_HEADING .. "\n\n" .. output
+  end
   local tol = ctx:tool_output_lines()
   return ToolView.restore_markdown(output, is_error, {
     max_lines = (tol and tol.task) or DEFAULT_OUTPUT_LINES,

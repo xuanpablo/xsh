@@ -88,6 +88,9 @@ impl App {
             return;
         }
         let session = &self.state.session;
+        // A mutating tool ran since the last flush: the transcript naming the
+        // side effect must reach disk now, not after the soft-save delay.
+        let durability_pending = session.mutating_since_flush();
         let sent = Sent {
             id: session.id,
             revision: session.revision(),
@@ -104,13 +107,17 @@ impl App {
             // session rule. Each one costs a meta record plus an fsync, so they
             // land at most once per `soft_delay`, which bounds what a crash
             // takes with it. Anything the agent produced skips the wait.
-            if last.content_revision == sent.content_revision && last.at.elapsed() < soft_delay {
+            if !durability_pending
+                && last.content_revision == sent.content_revision
+                && last.at.elapsed() < soft_delay
+            {
                 return;
             }
         }
 
         self.storage_writer
             .send(Arc::clone(&self.state.session), self.state.claim.clone());
+        self.state.session_mut().clear_mutating_flag();
         self.last_sent = Some(sent);
     }
 

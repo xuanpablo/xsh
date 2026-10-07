@@ -5,6 +5,7 @@ use color_eyre::Result;
 use color_eyre::eyre::bail;
 
 use maki_agent::tools::{all_builtin_tool_names, is_builtin_tool};
+use maki_storage::search::DEFAULT_SEARCH_LIMIT;
 
 use crate::print::OutputFormat;
 
@@ -309,6 +310,20 @@ pub enum SessionAction {
         /// Print machine-readable session summaries, one JSON array
         #[arg(long)]
         json: bool,
+    },
+    /// Full-text search across session transcripts
+    Search {
+        /// FTS5 query; each term is matched literally
+        query: String,
+        /// Show sessions from all projects
+        #[arg(short, long)]
+        global: bool,
+        /// Print machine-readable hits, one JSON array
+        #[arg(long)]
+        json: bool,
+        /// Maximum number of hits
+        #[arg(short, long, default_value_t = DEFAULT_SEARCH_LIMIT)]
+        limit: usize,
     },
     /// Delete a session
     Delete {

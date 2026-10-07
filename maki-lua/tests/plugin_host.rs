@@ -6067,6 +6067,8 @@ fn session_close_idempotent_and_prompt_after_close_errors() {
 #[test_case::test_case("{ audience = 'wurkflow' }", "unknown audience: wurkflow" ; "unknown_audience")]
 #[test_case::test_case("{ local_tools = { foo = { handler = function() return '' end } } }", "local_tools.foo: 'description' is required" ; "local_tool_missing_description")]
 #[test_case::test_case("{ local_tools = { foo = { description = 'd' } } }", "local_tools.foo: 'handler' is required" ; "local_tool_missing_handler")]
+#[test_case::test_case("{ fork_last = 3, seed = { { role = 'user', text = 'hi' } } }", "fork_last and seed are mutually exclusive" ; "fork_conflicts_with_seed")]
+#[test_case::test_case("{ fork_last = 3 }", "fork_last requires a parent session" ; "fork_without_session")]
 fn session_opts_validation_rejects(opts: &str, expected: &str) {
     let reg = fresh_registry();
     let host = PluginHost::new(Arc::clone(&reg)).unwrap();
