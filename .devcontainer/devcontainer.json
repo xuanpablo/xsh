@@ -1,0 +1,5 @@
+{
+  "name": "maki",
+  "image": "mcr.microsoft.com/devcontainers/rust:1",
+  "postCreateCommand": "rustup component add clippy rustfmt && cargo install --locked just stylua cargo-nextest cargo-machete"
+}

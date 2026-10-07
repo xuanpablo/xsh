@@ -1,0 +1,7 @@
+#!/usr/bin/env sh
+# Installed by `just hooks`. Formatting only, so a commit stays fast; the rest runs in CI.
+set -e
+cargo fmt --all -- --check
+if command -v stylua >/dev/null 2>&1; then
+    stylua --check plugins/
+fi
