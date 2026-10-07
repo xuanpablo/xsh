@@ -7,3 +7,9 @@ runs.csv
 /.playwright-mcp/
 /result
 AGENTS.local.md
+.env
+.env.*
+!.env.example
+.idea/
+.vscode/
+.DS_Store
