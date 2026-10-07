@@ -71,7 +71,7 @@ const THINKING_DROPPED: &str =
 const TIME_HINT_KEY: &str = "time";
 const TIME_FORMAT: &str = "%Y-%m-%d %H:%M %Z";
 
-pub fn resolve_compaction_model(
+pub async fn resolve_compaction_model(
     provider: &Arc<dyn Provider>,
     model: &Model,
     timeouts: maki_providers::Timeouts,
@@ -81,7 +81,7 @@ pub fn resolve_compaction_model(
         maki_providers::model_registry::spec_for_tier_any(maki_providers::ModelTier::Compaction)
         && model_policy.allows(&spec)
         && let Ok(mut m) = Model::from_spec(&spec)
-        && let Ok(p) = maki_providers::provider::from_model(&mut m, timeouts)
+        && let Ok(p) = maki_providers::provider::from_model_async(&mut m, timeouts).await
     {
         return (Arc::from(p), m);
     }
@@ -146,7 +146,7 @@ pub struct Agent<'h> {
     /// within a run, and not before every request.
     prompt_facts: Option<PromptFacts>,
     mode: AgentMode,
-    user_response_rx: Option<Arc<async_lock::Mutex<flume::Receiver<String>>>>,
+    user_response_rx: Option<Arc<smol::lock::Mutex<flume::Receiver<String>>>>,
     interrupt_source: Option<Arc<dyn InterruptSource>>,
     cancel: CancelToken,
     ledger: Arc<RunLedger>,
@@ -159,6 +159,7 @@ pub struct Agent<'h> {
     mcp: Option<McpSession>,
     config: AgentConfig,
     tool_output_lines: ToolOutputLines,
+    reauth: bool,
     reauth_attempts: u32,
     overflow_recoveries: u32,
     permissions: Arc<PermissionManager>,
@@ -209,6 +210,7 @@ impl<'h> Agent<'h> {
             rollback_len: 0,
             carry_from: 0,
             mcp: None,
+            reauth: false,
             reauth_attempts: 0,
             overflow_recoveries: 0,
             opts: RequestOptions::default(),
@@ -257,9 +259,17 @@ impl<'h> Agent<'h> {
 
     pub fn with_user_response_rx(
         mut self,
-        rx: Arc<async_lock::Mutex<flume::Receiver<String>>>,
+        rx: Arc<smol::lock::Mutex<flume::Receiver<String>>>,
     ) -> Self {
         self.user_response_rx = Some(rx);
+        self
+    }
+
+    /// On an auth error, emits [`AgentEvent::AuthRequired`] and waits on the
+    /// user response channel for a re-login instead of failing the run. Only
+    /// a frontend that answers that event may set it, and subagents inherit it.
+    pub fn with_reauth(mut self, reauth: bool) -> Self {
+        self.reauth = reauth;
         self
     }
 
@@ -920,7 +930,7 @@ impl<'h> Agent<'h> {
             error!(error = %err, attempts = self.reauth_attempts, "max re-auth attempts reached");
             return Err(err);
         }
-        let Some(rx) = &self.user_response_rx else {
+        let Some(rx) = self.user_response_rx.as_ref().filter(|_| self.reauth) else {
             error!(error = %err, model = %self.model.id, self.num_turns, "stream_message failed");
             return Err(err);
         };
@@ -1042,6 +1052,7 @@ impl<'h> Agent<'h> {
             task_id: self.task_id.clone(),
             tool_use_id: None,
             user_response_rx: self.user_response_rx.clone(),
+            reauth: self.reauth,
             loaded_instructions: self.loaded_instructions.clone(),
             call_instructions: CallInstructions::default(),
             cancel: self.cancel.clone(),
@@ -1124,7 +1135,8 @@ impl<'h> Agent<'h> {
             &self.model,
             self.timeouts,
             &self.model_policy,
-        );
+        )
+        .await;
         // Built from the fields, not `self.hooks()`, which would borrow all of
         // `self` while `history` is lent out mutably.
         let hooks = AgentHooks {
@@ -2952,6 +2964,32 @@ mod tests {
                         |b| matches!(b, ContentBlock::Text { text } if text.contains(PARTIAL))
                     )),
                 "failed attempt's text must not reach history"
+            );
+        });
+    }
+
+    const UNAUTHORIZED: u16 = 401;
+
+    /// SDK and ACP hold a response channel for questions only, so having one
+    /// must not park a 401 on a re-login nothing will ever send.
+    #[test]
+    fn auth_error_fails_the_run_without_reauth() {
+        smol::block_on(async {
+            let provider = StubStreamProvider {
+                fail_status: Some(UNAUTHORIZED),
+                ..Default::default()
+            };
+            let mut history = History::new(Vec::new());
+            let (agent, event_rx) = make_agent(provider, &mut history);
+            let answer_rx = flume::unbounded::<String>().1;
+            let mut agent =
+                agent.with_user_response_rx(Arc::new(smol::lock::Mutex::new(answer_rx)));
+
+            assert!(agent.run(default_input()).await.is_err());
+            assert!(
+                event_rx
+                    .drain()
+                    .all(|e| !matches!(e.event, AgentEvent::AuthRequired))
             );
         });
     }

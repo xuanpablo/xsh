@@ -200,7 +200,7 @@ impl Chat {
                 self.messages_panel.flush();
                 return ChatEventResult::Done;
             }
-            AgentEvent::Error { message } => {
+            AgentEvent::Error { message, .. } => {
                 self.messages_panel.flush();
                 return ChatEventResult::Error(message);
             }

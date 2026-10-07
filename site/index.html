@@ -7,7 +7,7 @@
        zooming in is untouched -->
   <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0">
   <title>maki</title>
-  <meta name="description" content="An efficient AI coding agent. Native Rust TUI. Immediate startup, 60 FPS, low memory. Indexes files instead of reading them, chains tools in a sandbox interpreter. Anthropic, OpenAI, Google, Z.AI, OpenRouter, Synthetic, or any OpenAI / Anthropic compatible API.">
+  <meta name="description" content="An efficient AI coding agent. Native Rust TUI. Immediate startup, 60 FPS, low memory. Indexes files instead of reading them, chains tools in a sandbox interpreter. Anthropic, OpenAI, Google, Z.AI, OpenRouter, any OpenAI / Anthropic compatible API, or a provider you write in Lua.">
   <meta name="theme-color" content="#dbe6ff" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#1d2040" media="(prefers-color-scheme: dark)">
   <meta property="og:type" content="website">
@@ -894,6 +894,30 @@
       transition: background 0.1s, color 0.1s;
     }
     .provider-chip:hover { background: var(--soft-hover); color: var(--accent); }
+    /* Lua is Portuguese for moon, and the hero already hangs one in the sky */
+    .lua-mark, .provider-chip.lua::after {
+      content: '';
+      display: inline-block;
+      width: 0.62em;
+      height: 0.62em;
+      border-radius: 50%;
+      box-shadow: inset 0.17em -0.1em 0 0 var(--accent);
+    }
+    .provider-chip.lua::after { margin-left: 0.45em; }
+    /* the border eats into the padding so the empty slot is the same size as its neighbours */
+    .provider-chip.yours {
+      padding: calc(0.62rem - 1px) calc(0.95rem - 1px);
+      background: none;
+      border: 1px dashed var(--nav-sep);
+      color: var(--ink-3);
+    }
+    .provider-chip.yours:hover { background: none; border-color: var(--accent); }
+    .provider-split {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+      gap: clamp(2rem, 4vw, 3.5rem);
+      align-items: start;
+    }
     .provider-plus {
       max-width: 58ch;
       font-size: 1.06rem;
@@ -1015,7 +1039,7 @@
       .pane-duo { grid-template-columns: 1fr; }
     }
     @media (max-width: 1220px) {
-      .pane-split, .pane-split.wide-left { grid-template-columns: 1fr; }
+      .pane-split, .pane-split.wide-left, .provider-split { grid-template-columns: 1fr; }
     }
     @media (max-width: 1000px) {
       .hero { min-height: 0; }
@@ -1250,7 +1274,7 @@ imports = <span class="fn">set</span>()
     <div class="features">
     <div class="feature">
       <strong><a href="#lua">Lua plugins</a></strong>
-      <p>Extend maki in Lua with a Neovim-style plugin API: add tools, slash commands, keymaps, and UI.</p>
+      <p>Extend maki in Lua with a Neovim-style plugin API: add tools, providers, slash commands, keymaps, and UI.</p>
       <p>Anything maki does out of the box, your plugins can do too.</p>
     </div>
     <div class="feature">
@@ -1280,7 +1304,7 @@ imports = <span class="fn">set</span>()
       <h2>Lua plugins: hackable all the way down</h2>
       <p>Every built-in tool, <code>read</code>, <code>bash</code>, <code>edit</code>, even <code>batch</code>, is itself a Lua plugin. Read them in <a href="https://github.com/tontinton/maki/tree/main/plugins" target="_blank" rel="noopener"><code>./plugins</code></a>.</p>
       <p>The <a href="/docs/lua-api/">API</a> mirrors Neovim (<code>maki.fs</code>, <code>maki.uv</code>, <code>maki.keymap</code>, <code>maki.treesitter</code>), so it feels familiar.</p>
-      <p>Drop a file in <code>~/.config/maki/plugins/</code> to add tools, slash commands, keymaps, or UI.</p>
+      <p>Drop a file in <code>~/.config/maki/lua/</code> and <code>require</code> it from <code>init.lua</code> to add tools, slash commands, keymaps, UI, or a whole <a href="#providers">provider</a>.</p>
     </div>
 
     <div class="pane-duo">
@@ -1353,32 +1377,61 @@ imports = <span class="fn">set</span>()
   <div class="content">
   <section class="block reveal" id="providers" data-section="providers">
     <div class="sec-head">
-      <h2>Providers</h2>
+      <h2>Providers: any&nbsp;API, one Lua&nbsp;file</h2>
       <p>Set an API key env var, or use <code>maki auth login openai</code> for OAuth.</p>
     </div>
-    <div class="provider-grid">
-      <a href="/docs/providers/#anthropic" class="provider-chip">Anthropic</a>
-      <a href="/docs/providers/#openai" class="provider-chip">OpenAI</a>
-      <a href="/docs/providers/#xai" class="provider-chip">xAI</a>
-      <a href="/docs/providers/#google" class="provider-chip">Google</a>
-      <a href="/docs/providers/#copilot" class="provider-chip">Copilot</a>
-      <a href="/docs/providers/#ollama" class="provider-chip">Ollama</a>
-      <a href="/docs/providers/#llamacpp" class="provider-chip">llama.cpp</a>
-      <a href="/docs/providers/#mistral" class="provider-chip">Mistral</a>
-      <a href="/docs/providers/#z-ai" class="provider-chip">Z.AI</a>
-      <a href="/docs/providers/#deepseek" class="provider-chip">DeepSeek</a>
-      <a href="/docs/providers/#openrouter" class="provider-chip">OpenRouter</a>
-      <a href="/docs/providers/#requesty" class="provider-chip">Requesty</a>
-      <a href="/docs/providers/#synthetic" class="provider-chip">Synthetic</a>
-      <a href="/docs/providers/#regolo" class="provider-chip">Regolo</a>
-      <a href="/docs/providers/#tensorx" class="provider-chip">TensorX</a>
-      <a href="/docs/providers/#opencode-zen" class="provider-chip">OpenCode Zen</a>
-      <a href="/docs/providers/#opencode-go" class="provider-chip">OpenCode Go</a>
-      <a href="/docs/providers/#aperture" class="provider-chip">Aperture</a>
-    </div>
-    <div class="provider-plus">
-      <p>Anything that speaks the OpenAI or Anthropic API works too.</p>
-      <p>Anything else takes a short <a href="/docs/providers/#plugin-providers">Lua plugin</a>: a table of models, an auth hook, done.</p>
+    <div class="provider-split">
+      <div>
+        <div class="provider-grid">
+          <a href="/docs/providers/#anthropic" class="provider-chip">Anthropic</a>
+          <a href="/docs/providers/#openai" class="provider-chip">OpenAI</a>
+          <a href="/docs/providers/#xai" class="provider-chip">xAI</a>
+          <a href="/docs/providers/#google" class="provider-chip">Google</a>
+          <a href="/docs/providers/#copilot" class="provider-chip">Copilot</a>
+          <a href="/docs/providers/#ollama" class="provider-chip">Ollama</a>
+          <a href="/docs/providers/#llamacpp" class="provider-chip">llama.cpp</a>
+          <a href="/docs/providers/#z-ai" class="provider-chip">Z.AI</a>
+          <a href="/docs/providers/#opencode-zen" class="provider-chip">OpenCode Zen</a>
+          <a href="/docs/providers/#opencode-go" class="provider-chip">OpenCode Go</a>
+          <a href="/docs/providers/#aperture" class="provider-chip">Aperture</a>
+          <a href="/docs/providers/#mistral" class="provider-chip lua" title="Lua plugin">Mistral</a>
+          <a href="/docs/providers/#deepseek" class="provider-chip lua" title="Lua plugin">DeepSeek</a>
+          <a href="/docs/providers/#openrouter" class="provider-chip lua" title="Lua plugin">OpenRouter</a>
+          <a href="/docs/providers/#requesty" class="provider-chip lua" title="Lua plugin">Requesty</a>
+          <a href="/docs/providers/#synthetic" class="provider-chip lua" title="Lua plugin">Synthetic</a>
+          <a href="/docs/providers/#regolo" class="provider-chip lua" title="Lua plugin">Regolo</a>
+          <a href="/docs/providers/#tensorx" class="provider-chip lua" title="Lua plugin">TensorX</a>
+          <a href="/docs/providers/#plugin-providers" class="provider-chip yours">+ yours</a>
+        </div>
+        <div class="provider-plus">
+          <p>Anything that speaks the OpenAI or Anthropic API works too.</p>
+          <p>Anything else takes a short <a href="/docs/providers/#plugin-providers">Lua plugin</a>: a table of models, an auth hook, done.</p>
+          <p>The ones with a <span class="lua-mark" role="img" aria-label="moon"></span> already are. <a href="https://github.com/tontinton/maki/tree/main/plugins" target="_blank" rel="noopener">Read them</a>.</p>
+        </div>
+      </div>
+      <div>
+        <div class="pane pane-solo">
+          <div class="pane-label"><b>add your company's gateway, behind SSO</b></div>
+          <pre><span class="fn">maki.provider.register</span>({
+  slug = <span class="st">"corp"</span>,
+  display_name = <span class="st">"Corp gateway"</span>,
+  codec = <span class="st">"anthropic"</span>,
+  base_url = <span class="st">"https://llm.corp.example"</span>,
+  models = {
+    { prefixes = { <span class="st">"claude-opus-4-6"</span> }, tier = <span class="st">"strong"</span> },
+    { prefixes = { <span class="st">"claude-haiku-4-5"</span> }, tier = <span class="st">"weak"</span> },
+  },
+  auth = <span class="kw">function</span>()
+    <span class="kw">local</span> sso = <span class="fn">maki.fs.read</span>(<span class="st">"~/.corp/sso.json"</span>)
+    <span class="kw">local</span> bearer = <span class="st">"Bearer "</span> .. <span class="fn">maki.json.decode</span>(sso).token
+    <span class="kw">return</span> { headers = { authorization = bearer } }
+  <span class="kw">end</span>,
+})</pre>
+        </div>
+        <div class="stat">
+          <span><span class="stat-num">15</span> lines</span> <span class="stat-arrow">&rarr;</span> <span><span class="stat-num">corp/claude-opus-4-6</span> in <span class="stat-num">/model</span></span>
+        </div>
+      </div>
     </div>
   </section>
   </div>

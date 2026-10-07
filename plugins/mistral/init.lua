@@ -67,6 +67,13 @@ maki.provider.register({
   aperture = { path_prefix = "/v1" },
   models = {
     {
+      prefixes = { "mistral-large-4", "mistral-large-4-0" },
+      tier = "strong",
+      supports_vision = true,
+      context_window = 1000000,
+      pricing = { input = 1.36, output = 4.18, cache_write = 0.0, cache_read = 0.14 },
+    },
+    {
       prefixes = { "mistral-medium-latest", "mistral-medium-3.5", "mistral-medium-3-5", "mistral-medium-2604" },
       tier = "strong",
       default = true,

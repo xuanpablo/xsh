@@ -446,7 +446,7 @@ fn ctrl_c_quits_when_input_empty() {
 }
 
 #[test_case(done(), ExitRequest::Success ; "done_exits_success")]
-#[test_case(AgentEvent::Error { message: "boom".into() }, ExitRequest::Error ; "error_exits_error")]
+#[test_case(AgentEvent::Error { message: "boom".into(), auth: false }, ExitRequest::Error ; "error_exits_error")]
 fn exit_on_done_flag_triggers_exit(event: AgentEvent, expected: ExitRequest) {
     let mut app = test_app();
     app.exit_on_done = true;
@@ -673,7 +673,10 @@ fn queue_item_consumed_marks_agent_streaming() {
 fn agent_error_lands_in_chat(message: String, expected: String) {
     let mut app = test_app();
     app.run_id = 1;
-    app.update(agent_msg(AgentEvent::Error { message }));
+    app.update(agent_msg(AgentEvent::Error {
+        message,
+        auth: false,
+    }));
     assert_eq!(app.chats[0].last_message_role(), Some(&DisplayRole::Error));
     assert_eq!(app.chats[0].last_message_text(), expected);
 }
@@ -765,6 +768,7 @@ pub(crate) fn cancel_app(app: &mut App) {
 pub(crate) fn error_app(app: &mut App) {
     app.update(agent_msg(AgentEvent::Error {
         message: AGENT_ERROR_MSG.into(),
+        auth: false,
     }));
 }
 
@@ -4540,7 +4544,7 @@ fn streaming_app_with_history() -> App {
 /// next frame's checkpoint syncs the mirror whatever event arrived.
 #[test_case(done() ; "stale_done")]
 #[test_case(
-    AgentEvent::Error { message: "timeout".into() } ; "stale_error"
+    AgentEvent::Error { message: "timeout".into(), auth: false } ; "stale_error"
 )]
 fn checkpoint_after_cancel_persists_the_cancelled_turn(event: AgentEvent) {
     let mut app = streaming_app_with_history();
@@ -4636,6 +4640,7 @@ fn parent_error_refreshes_picker_and_persists_only_completed_children() {
 
     app.update(agent_msg(AgentEvent::Error {
         message: "boom".into(),
+        auth: false,
     }));
 
     app.checkpoint();
@@ -4720,6 +4725,7 @@ fn active_shell_survives_agent_error_while_agent_and_child_tools_fail() {
 
     app.update(agent_msg(AgentEvent::Error {
         message: "provider overloaded".into(),
+        auth: false,
     }));
 
     assert_eq!(app.chats[0].in_progress_count(), 1);
@@ -4774,6 +4780,7 @@ fn error_event_matching_run_id_saves_session_and_queued_messages() {
 
     app.update(agent_msg(AgentEvent::Error {
         message: "boom".into(),
+        auth: false,
     }));
     app.checkpoint();
 
@@ -4794,6 +4801,7 @@ fn flush_restored_queue_drops_recovery_snapshot() {
     app.queue_and_notify(queued_msg("next"));
     app.update(agent_msg(AgentEvent::Error {
         message: "boom".into(),
+        auth: false,
     }));
     app.checkpoint();
     assert_eq!(app.state.session.meta.queued_messages, ["next"]);
@@ -6228,6 +6236,7 @@ fn agent_error_creates_synthetic_tool_done_with_message() {
     let error_msg = "Provider is overloaded";
     app.update(agent_msg(AgentEvent::Error {
         message: error_msg.into(),
+        auth: false,
     }));
 
     assert_eq!(app.main_chat().in_progress_count(), 0);

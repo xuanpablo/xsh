@@ -58,7 +58,7 @@ pub(super) struct AgentLoop {
     permissions: Arc<PermissionManager>,
     file_access: Arc<FileAccess>,
     agent_tx: flume::Sender<Envelope>,
-    answer_rx: Arc<async_lock::Mutex<flume::Receiver<String>>>,
+    answer_rx: Arc<smol::lock::Mutex<flume::Receiver<String>>>,
     queue: Arc<QueueReceiver>,
     session_id: SessionRef,
     mailbox: SessionMailbox,
@@ -106,7 +106,7 @@ impl AgentLoop {
             permissions,
             file_access: FileAccess::fresh(),
             agent_tx,
-            answer_rx: Arc::new(async_lock::Mutex::new(answer_rx)),
+            answer_rx: Arc::new(smol::lock::Mutex::new(answer_rx)),
             queue,
             mailbox,
             timeouts,
@@ -248,7 +248,8 @@ impl AgentLoop {
             &slot.model,
             self.timeouts,
             &self.model_policy,
-        );
+        )
+        .await;
         // The summary goes out under a fresh frame for the session's own model,
         // so the gauge and `/btw` read the prompt the next run sends.
         let next = context(&slot.model, compaction.workflow);
@@ -355,6 +356,7 @@ impl AgentLoop {
         )
         .with_loaded_instructions(self.instructions.loaded.clone())
         .with_user_response_rx(Arc::clone(&self.answer_rx))
+        .with_reauth(true)
         .with_interrupt_source(Arc::clone(&self.queue) as Arc<dyn maki_agent::InterruptSource>)
         .with_cancel(cancel.clone())
         .with_model_sync(Arc::clone(&self.model_slot))
@@ -377,14 +379,17 @@ impl AgentLoop {
     /// nothing waits on it. A failure keeps the heuristic title.
     fn spawn_title(&self, prompt: String, event_tx: EventSender) {
         let slot = self.model_slot.load();
-        let (provider, model) = agent::resolve_compaction_model(
-            &slot.provider,
-            &slot.model,
-            self.timeouts,
-            &self.model_policy,
-        );
         let session_id = self.session_id.clone();
+        let timeouts = self.timeouts;
+        let model_policy = Arc::clone(&self.model_policy);
         smol::spawn(async move {
+            let (provider, model) = agent::resolve_compaction_model(
+                &slot.provider,
+                &slot.model,
+                timeouts,
+                &model_policy,
+            )
+            .await;
             match agent::titles::generate(provider.as_ref(), &model, &prompt, Some(&session_id))
                 .await
             {
@@ -404,9 +409,7 @@ impl AgentLoop {
     fn emit_error(&self, run_id: u64, error: AgentError) {
         error!(error = %error, "agent error");
         let event_tx = EventSender::new(self.agent_tx.clone(), run_id);
-        let _ = event_tx.send(AgentEvent::Error {
-            message: error.user_message(),
-        });
+        let _ = event_tx.send(AgentEvent::error(&error));
     }
 }
 

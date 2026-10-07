@@ -6,7 +6,6 @@ use std::pin::pin;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use async_lock::Mutex as AsyncMutex;
 use futures::future::{Either, select};
 use maki_agent::agent::live_history;
 use maki_agent::agent::{LoadedInstructions, tool_dispatch};
@@ -35,6 +34,7 @@ use maki_storage::id::MakiId;
 use maki_storage::sessions::StoredThinking;
 use mlua::{Function, IntoLuaMulti, Lua, Result as LuaResult, Table, Value as LuaValue};
 use serde_json::Value as JsonValue;
+use smol::lock::Mutex as AsyncMutex;
 use tracing::info;
 
 use crate::api::tool::{audiences_to_lua, parse_audience};
@@ -751,6 +751,7 @@ async fn session(
         child_cancel,
         answer_rx: Arc::new(AsyncMutex::new(answer_rx)),
         answer_tx: Some(answer_tx),
+        reauth: agent_ctx.reauth,
         inbox: Arc::new(SubagentInbox::default()),
         parent_cancels: Arc::clone(&agent_ctx.subagent_cancels),
         ui_id,
@@ -880,6 +881,7 @@ struct SessionState {
     child_cancel: maki_agent::cancel::CancelToken,
     answer_rx: Arc<AsyncMutex<flume::Receiver<String>>>,
     answer_tx: Option<flume::Sender<String>>,
+    reauth: bool,
     /// Shared with the host through [`SubagentInfo`], so a user watching this
     /// session can queue messages that its next turn boundary picks up.
     inbox: Arc<SubagentInbox>,
@@ -995,6 +997,7 @@ async fn prompt(
         },
     )
     .with_user_response_rx(Arc::clone(&s.answer_rx))
+    .with_reauth(s.reauth)
     .with_interrupt_source(Arc::clone(&s.inbox) as Arc<dyn maki_agent::InterruptSource>)
     .with_loaded_instructions(s.loaded_instructions.clone())
     .with_cancel(s.child_cancel.clone())
@@ -1269,6 +1272,7 @@ mod tests {
             turn(tokens(50, 10), 0.5),
             AgentEvent::Error {
                 message: IGNORED_ERROR.into(),
+                auth: false,
             },
             AgentEvent::Done {
                 usage: DONE_USAGE,

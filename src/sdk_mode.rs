@@ -1177,7 +1177,7 @@ impl EventPump {
                 let result = mem::take(&mut self.result_text);
                 self.emit_turn_result(is_error, result, *num_turns, *usage)?;
             }
-            AgentEvent::Error { message } => {
+            AgentEvent::Error { message, .. } => {
                 self.emit_turn_result(true, message.clone(), 0, TokenUsage::default())?;
             }
         }
@@ -1671,6 +1671,7 @@ mod tests {
         retained
             .send(AgentEvent::Error {
                 message: PUMP_ERROR.into(),
+                auth: false,
             })
             .unwrap();
         drop(guard);
