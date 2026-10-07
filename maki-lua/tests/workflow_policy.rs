@@ -56,8 +56,11 @@ return {
 fn load_workflow_host() -> (Arc<ToolRegistry>, PluginHost) {
     let reg = Arc::new(ToolRegistry::new());
     let host = PluginHost::new(Arc::clone(&reg)).unwrap();
-    host.load_source("workflow_policy", &format!("{STUB_PRELUDE}\n{WORKFLOW_PLUGIN_SRC}"))
-        .unwrap();
+    host.load_source(
+        "workflow_policy",
+        &format!("{STUB_PRELUDE}\n{WORKFLOW_PLUGIN_SRC}"),
+    )
+    .unwrap();
     (reg, host)
 }
 
@@ -81,12 +84,18 @@ fn checkpoint_json(output: &str) -> Value {
         .expect("checkpoint fence missing")
         + CHECKPOINT_FENCE.len()
         + 1;
-    let end = start + output[start..].find(CHECKPOINT_FENCE).expect("no closing fence") - 1;
+    let end = start
+        + output[start..]
+            .find(CHECKPOINT_FENCE)
+            .expect("no closing fence")
+        - 1;
     serde_json::from_str(&output[start..end]).expect("checkpoint is not valid json")
 }
 
 fn step_ran(output: &str, step: &str) -> bool {
-    output.lines().any(|l| l.starts_with("- ") && l.contains(step))
+    output
+        .lines()
+        .any(|l| l.starts_with("- ") && l.contains(step))
 }
 
 const COMPILE_ERROR_SCRIPT: &str = "return {";
@@ -97,7 +106,10 @@ fn workflow_runs_steps_calls_tools_and_reports_state() {
     let out = exec_tool(&reg, json!({ "script": TWO_STEP_SCRIPT })).expect("workflow failed");
     assert!(step_ran(&out, "fetch"), "fetch step missing: {out}");
     assert!(step_ran(&out, "done"), "done step missing: {out}");
-    assert!(out.contains("got out:read"), "tool result not logged: {out}");
+    assert!(
+        out.contains("got out:read"),
+        "tool result not logged: {out}"
+    );
     assert!(
         out.contains(r#""finished":true"#) || out.contains(r#""finished": true"#),
         "final state missing: {out}"
@@ -131,22 +143,14 @@ fn workflow_resume_rejects_a_different_script() {
     let (reg, _host) = load_workflow_host();
     let err = exec_tool(&reg, json!({ "script": LOOP_SCRIPT })).unwrap_err();
     let ck = checkpoint_json(&err).to_string();
-    let err = exec_tool(
-        &reg,
-        json!({ "script": TWO_STEP_SCRIPT, "resume": ck }),
-    )
-    .unwrap_err();
+    let err = exec_tool(&reg, json!({ "script": TWO_STEP_SCRIPT, "resume": ck })).unwrap_err();
     assert!(err.contains("different script"), "mismatch error: {err}");
 }
 
 #[test]
 fn workflow_step_limit_checkpoints_and_resumes() {
     let (reg, _host) = load_workflow_host();
-    let err = exec_tool(
-        &reg,
-        json!({ "script": TWO_STEP_SCRIPT, "max_steps": 1 }),
-    )
-    .unwrap_err();
+    let err = exec_tool(&reg, json!({ "script": TWO_STEP_SCRIPT, "max_steps": 1 })).unwrap_err();
     assert!(err.contains("step budget exhausted"), "budget error: {err}");
     assert!(step_ran(&err, "fetch"), "fetch ran before the limit: {err}");
 

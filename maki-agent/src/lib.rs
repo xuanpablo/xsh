@@ -33,7 +33,9 @@ pub use mailbox::{MailboxError, SessionMailbox};
 pub use maki_config::{AgentConfig, PermissionsConfig, SessionDefaults, ToolOutputLines};
 pub mod command;
 pub mod jobs;
-pub use jobs::{CancelOutcome, JobError, JobId, JobInfo, JobOwner, JobRegistry, JobSpec, PollSnapshot};
+pub use jobs::{
+    CancelOutcome, JobError, JobId, JobInfo, JobOwner, JobRegistry, JobSpec, PollSnapshot,
+};
 pub mod diff;
 pub mod permissions;
 pub mod prompt;

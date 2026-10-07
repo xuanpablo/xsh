@@ -328,7 +328,9 @@ impl MessagesPanel {
         }
 
         match event.output.as_ref() {
-            ToolOutput::Plain(text) | ToolOutput::Markdown(text) | ToolOutput::ReadDir(text)
+            ToolOutput::Plain(text)
+            | ToolOutput::Markdown(text)
+            | ToolOutput::ReadDir(text)
             | ToolOutput::Report(text)
                 if msg.render_snapshot.is_none() =>
             {

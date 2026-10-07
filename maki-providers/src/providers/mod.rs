@@ -474,7 +474,8 @@ impl KeyPool {
     fn key_from_config(slug: &str) -> Option<String> {
         let key = maki_config::providers::ProvidersConfig::load()
             .get(slug)?
-            .api_key.clone()?;
+            .api_key
+            .clone()?;
         if !key.starts_with(maki_storage::auth::REF_PREFIX) {
             return Some(key);
         }

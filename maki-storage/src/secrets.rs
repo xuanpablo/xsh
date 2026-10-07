@@ -150,7 +150,11 @@ pub enum AuthFlowError {
 pub trait AuthFlow: Send + Sync {
     fn slug(&self) -> &'static str;
 
-    fn run(&self, dir: &StateDir, store: &ProtectedStore<'_>) -> Result<ProviderCredentials, AuthFlowError>;
+    fn run(
+        &self,
+        dir: &StateDir,
+        store: &ProtectedStore<'_>,
+    ) -> Result<ProviderCredentials, AuthFlowError>;
 }
 
 #[derive(Default)]
@@ -167,11 +171,7 @@ impl AuthFlowRegistry {
         self.flows.push(flow);
     }
 
-    pub fn run(
-        &self,
-        slug: &str,
-        dir: &StateDir,
-    ) -> Result<ProviderCredentials, AuthFlowError> {
+    pub fn run(&self, slug: &str, dir: &StateDir) -> Result<ProviderCredentials, AuthFlowError> {
         let store = ProtectedStore::new(dir);
         for flow in &self.flows {
             if flow.slug() == slug {
@@ -185,8 +185,8 @@ impl AuthFlowRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::{ProviderCredentials, save_secret};
     use crate::StateDir;
+    use crate::auth::{ProviderCredentials, save_secret};
     use tempfile::TempDir;
 
     const SECRET_NAME: &str = "openai-key";

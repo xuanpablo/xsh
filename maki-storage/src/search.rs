@@ -73,7 +73,10 @@ impl SessionIndex {
             }
             let rows = transcript_rows(&fs::read(&path)?);
             let tx = self.conn.transaction()?;
-            tx.execute("DELETE FROM transcript WHERE session_id = ?1", (session_id,))?;
+            tx.execute(
+                "DELETE FROM transcript WHERE session_id = ?1",
+                (session_id,),
+            )?;
             {
                 let mut stmt = tx.prepare(
                     "INSERT INTO transcript (session_id, role, content) VALUES (?1, ?2, ?3)",
@@ -101,16 +104,13 @@ impl SessionIndex {
              FROM transcript WHERE transcript MATCH ?2 ORDER BY rank LIMIT ?3",
         )?;
         let hits = stmt
-            .query_map(
-                (SNIPPET_WORDS, match_query(query), limit),
-                |row| {
-                    Ok(SearchHit {
-                        session_id: row.get(0)?,
-                        role: row.get(1)?,
-                        snippet: row.get(2)?,
-                    })
-                },
-            )?
+            .query_map((SNIPPET_WORDS, match_query(query), limit), |row| {
+                Ok(SearchHit {
+                    session_id: row.get(0)?,
+                    role: row.get(1)?,
+                    snippet: row.get(2)?,
+                })
+            })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(hits)
     }
@@ -213,10 +213,8 @@ mod tests {
         let dir = StateDir::from_path(tmp.path().to_path_buf());
         let sessions_dir = dir.path().join(SESSIONS_DIR);
         fs::create_dir_all(&sessions_dir).unwrap();
-        let first = Session::<serde_json::Value, serde_json::Value, serde_json::Value>::new(
-            "m",
-            "/tmp",
-        );
+        let first =
+            Session::<serde_json::Value, serde_json::Value, serde_json::Value>::new("m", "/tmp");
         fs::write(
             sessions_dir.join(format!("{}.jsonl", first.id)),
             format!(
@@ -226,10 +224,8 @@ mod tests {
             ),
         )
         .unwrap();
-        let second = Session::<serde_json::Value, serde_json::Value, serde_json::Value>::new(
-            "m",
-            "/tmp",
-        );
+        let second =
+            Session::<serde_json::Value, serde_json::Value, serde_json::Value>::new("m", "/tmp");
         fs::write(
             sessions_dir.join(format!("{}.jsonl", second.id)),
             format!(
@@ -246,9 +242,11 @@ mod tests {
         assert_eq!(hits[0].role, "user");
         assert!(hits[0].snippet.contains(QUERY), "{:?}", hits[0].snippet);
 
-        assert!(search_sessions(&dir, MISS, DEFAULT_SEARCH_LIMIT)
-            .unwrap()
-            .is_empty());
+        assert!(
+            search_sessions(&dir, MISS, DEFAULT_SEARCH_LIMIT)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

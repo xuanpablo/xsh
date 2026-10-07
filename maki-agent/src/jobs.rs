@@ -401,8 +401,13 @@ mod tests {
     #[test]
     fn cancel_kills_running_job() {
         let registry = JobRegistry::new();
-        let id = registry.spawn(&spec(SESSION_A, "sleep", SLEEP_JOB)).unwrap();
-        assert_eq!(registry.cancel(SESSION_A, id).unwrap(), CancelOutcome::Killed);
+        let id = registry
+            .spawn(&spec(SESSION_A, "sleep", SLEEP_JOB))
+            .unwrap();
+        assert_eq!(
+            registry.cancel(SESSION_A, id).unwrap(),
+            CancelOutcome::Killed
+        );
         let snapshot = registry.poll_exited(SESSION_A, id).unwrap();
         assert_ne!(snapshot.exit_code, Some(0));
         assert_eq!(

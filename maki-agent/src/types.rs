@@ -292,9 +292,7 @@ impl ToolOutput {
                 let n = text.text.lines().count();
                 Some(format!("{n} lines"))
             }
-            Self::Report(text) if !text.text.is_empty() => {
-                Some(REPORT_ANNOTATION.to_owned())
-            }
+            Self::Report(text) if !text.text.is_empty() => Some(REPORT_ANNOTATION.to_owned()),
             Self::Image { text, .. } => Some(
                 text.strip_prefix("[image: ")
                     .and_then(|t| t.strip_suffix(']'))

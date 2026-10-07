@@ -776,7 +776,9 @@ fn push_section(out: &mut String, text: &str) {
 /// The untruncated output text, for the variants that carry one.
 fn plain_output_text(output: &ToolOutput) -> Option<&str> {
     match output {
-        ToolOutput::Plain(t) | ToolOutput::Markdown(t) | ToolOutput::ReadDir(t)
+        ToolOutput::Plain(t)
+        | ToolOutput::Markdown(t)
+        | ToolOutput::ReadDir(t)
         | ToolOutput::Report(t) => Some(t.text.as_str()),
         ToolOutput::Batch { text } => Some(text.as_str()),
         _ => None,
