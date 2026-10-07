@@ -40,6 +40,11 @@ Cheapest first, and scope to the crate you touched while iterating:
 
 Read `justfile` for more.
 
+- `just hooks` (once per clone) - check formatting on every commit via `.githooks/`
+- `just dep-drift` - member crates must inherit `[workspace.dependencies]`
+- `just todos` - list TODO/FIXME debt markers
+- `just agents-md-check` - docs must not mention a recipe that no longer exists
+
 Dev builds skip debug info for deps and vendored C (our crates keep it); to debug into a dep set `[profile.dev.package.<name>] debug = true`.
 
 ## Nix

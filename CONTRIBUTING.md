@@ -8,7 +8,11 @@ When opening an issue, validate there is no open / closed issue talking about th
 
 Regarding AI use in PRs, describe how you used AI, even include the prompts if unsure.
 
-Useful commands are in the `justfile` file, most useful probably is `just ci` that runs locally basically everything we run in the CI automatically to block PRs.
+Useful commands are in the `justfile` file, most useful probably is `just ci` that runs locally basically everything we run in the CI automatically to block PRs. Run `just hooks` once after cloning so every commit checks formatting locally.
+
+When bumping a dependency, prefer a release that has been out for at least 7 days; security fixes and targeted bugfixes can go in the same day. Dependabot opens the routine ones.
+
+Releases are cut by pushing a tag; the full procedure and its failure modes are in docs/runbooks/release.md.
 
 Rebuilds are slow mostly because of the linker, so dev builds skip debug info for the dependencies and for the C we build from source (`profile.dev.build-override` is where `cc` picks up `-g`). Our own crates keep theirs, so debugging maki feels the same as always, and if you ever want to step into a dependency, add `[profile.dev.package.<name>] debug = true`, or comment out `[profile.dev.package."*"]` in `Cargo.toml` to get all of them back.
 
