@@ -1,5 +1,8 @@
 {
   "name": "maki",
   "image": "mcr.microsoft.com/devcontainers/rust:1",
-  "postCreateCommand": "rustup component add clippy rustfmt && cargo install --locked just stylua cargo-nextest cargo-machete"
+  "features": {
+    "ghcr.io/devcontainers/features/github-cli:1": {}
+  },
+  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y ripgrep && rustup toolchain install 1.99.0 --profile minimal --component clippy --component rustfmt && rustup default 1.99.0 && cargo install --locked just stylua cargo-nextest cargo-machete"
 }
